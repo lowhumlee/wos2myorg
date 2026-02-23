@@ -1,0 +1,7 @@
+pandas
+rapidfuzz
+unidecode
+openpyxl
+rich
+typer
+pyyaml

@@ -1,0 +1,7 @@
+muv_patterns:
+  - medical university varna
+  - med univ varna
+  - mu varna
+
+fuzzy_threshold: 0.85
+interactive: true
