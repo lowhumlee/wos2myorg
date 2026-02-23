@@ -1,0 +1,71 @@
+OrganizationID,OrganizationName,ParentOrgaID
+1000,MEDICAL UNIVERSITY VARNA,
+1001,Faculty of Medicine,1000
+1002,Faculty of Dental Medicine,1000
+1003,Faculty of Pharmacy,1000
+1004,Faculty of Public Health,1000
+1005,Affiliate Sliven,1000
+1006,Affiliate Veliko Tarnovo,1000
+1007,Affiliate Shumen,1000
+1008,Medical College,1000
+1009,Department of Foreign Language Teaching Communications and Sport,1000
+1010,Library of Medical University Varna,1000
+1065,Center for simulation technology and medical equipment,1000
+1071,St. Marina University Hospital - Varna,1000
+1072,St. Anna University Hospital - Varna,1000
+1073,Prof. D. Stamatov Specialized Obstetrics and Gynecology Hospital - Varna,1000
+1074,Specialized Eye Hospital - Varna,1000
+1067,Research Institute,1000
+1011,Department of Anaesthesiology Emergency Intensive Medicine,1001
+1012,Department of Anatomy and Cell Biology,1001
+1013,Department of Cardiovascular Surgery and Angiology,1001
+1014,Department of Clinical Laboratory,1001
+1015,Department of General and Clinical Pathology Forensic Medicine and Deontology,1001
+1016,Department of General and Operative Surgery,1001
+1017,Department of General Medicine,1001
+1018,Department of Imaging Diagnostics Interventional Radiology,1001
+1019,Department of Infectious Diseases Parasitology and Dermatovenereology,1001
+1020,Department of Medical Genetics,1001
+1021,Department of Microbiology and Virusology,1001
+1022,Department of Neurology and Neuroscience,1001
+1023,Department of Neurosurgery and ENT,1001
+1024,Department of Obstetrics and Gynaecology,1001
+1025,Department of Oncology,1001
+1026,Department of Ophthalmology and Visual Sciences,1001
+1027,Department of Orthopaedics and Traumatology,1001
+1028,Department of Paediatrics,1001
+1029,Department of Pharmacology and Clinical Pharmacology and Therapeutics,1001
+1030,Department of Physiology and Pathophysiology,1001
+1031,Department of Propaedeutics of Internal Diseases,1001
+1032,Department of Psychiatry and Medical Psychology,1001
+1033,Department of Surgery,1001
+1034,Department of Urology,1001
+1035,Department of Nuclear Medicine Metabolic Therapy and Radiotherapy,1001
+1036,First Department of Internal Diseases,1001
+1037,Second Department of Internal Diseases,1001
+1038,Department of Clinical Medical Sciences,1002
+1039,Department of Conservative Dental Treatment and Oral Pathology,1002
+1040,Department of Dental Material Science and Propaedeutics of Prosthetic Dental Medicine,1002
+1041,Department of Oral Surgery,1002
+1042,Department of Pediatric Dental Medicine,1002
+1043,Department of Periodontology and Dental Implantology,1002
+1044,Department of Orthodontics,1002
+1045,Department of Biochemistry Molecular Medicine and Nutrigenomics,1003
+1046,Department of Biology,1003
+1047,Department of Chemistry,1003
+1048,Department of Organization and Economics of Pharmacy,1003
+1049,Department of Pharmaceutical Chemistry,1003
+1050,Department of Pharmaceutical Technologies,1003
+1051,Department of Pharmacology Toxicology and Pharmacotherapy,1003
+1052,Department of Physics and Biophysics,1003
+1053,Department of Clinical Medical Sciences,1003
+1054,Department of Disaster Medicine and Maritime Medicine,1004
+1055,Department of Economics and Health Care Management,1004
+1056,Department of Hygiene and Epidemiology,1004
+1057,Department of Medical Equipment Electronic and Information Technologies in Healthcare,1004
+1058,Department of Physiotherapy Rehabilitation and Thalassotherapy,1004
+1059,Department of Social Medicine and Health Care Organisation,1004
+1060,Department of Speech Therapy and Medical Pedagogics,1004
+1061,Department of Kinesitherapy,1004
+1062,Department of Nursing Care,1004
+1063,Department of Optometry and Occupational Diseases,1004
