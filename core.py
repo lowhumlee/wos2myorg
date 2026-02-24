@@ -1,6 +1,6 @@
 from collections import defaultdict
 
-from .normalize import (
+from normalize import (
     normalize_name,
     is_initials_name,
     surname_initials_key,
