@@ -287,7 +287,19 @@ with tab_load:
         wos_preview = list(csv.DictReader(io.StringIO(wos_file.read().decode("utf-8-sig"))))
         wos_file.seek(0)
         with st.expander(f"Preview: WoS Records ({len(wos_preview)} records)", expanded=False):
-            st.dataframe(pd.DataFrame(wos_preview)[["UT", "AF"]].head(10), use_container_width=True)
+            if wos_preview:
+                df_wos_prev = pd.DataFrame(wos_preview)
+                # Strip whitespace from column names (WoS exports sometimes add spaces)
+                df_wos_prev.columns = [c.strip() for c in df_wos_prev.columns]
+                # Show UT + AF if present, otherwise show all columns
+                preferred = [c for c in ["UT", "AF"] if c in df_wos_prev.columns]
+                st.caption(f"Detected columns: {list(df_wos_prev.columns)}")
+                if preferred:
+                    st.dataframe(df_wos_prev[preferred].head(10), use_container_width=True)
+                else:
+                    st.dataframe(df_wos_prev.head(10), use_container_width=True)
+            else:
+                st.warning("No rows found in WoS file.")
 
     st.markdown("---")
 
