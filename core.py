@@ -9,6 +9,31 @@ from .normalize import (
 
 
 # ==========================================================
+# SAFE FIELD EXTRACTORS
+# ==========================================================
+
+def extract_author_name(pair: dict) -> str:
+    """
+    Safely extract author name from WoS pair.
+    Handles different possible column names.
+    """
+    return (
+        pair.get("author")
+        or pair.get("AuthorFullName")
+        or pair.get("AF")
+        or pair.get("AU")
+        or ""
+    )
+
+
+def extract_ut(pair: dict) -> str:
+    """
+    Safely extract UT from WoS pair.
+    """
+    return pair.get("ut") or pair.get("UT") or ""
+
+
+# ==========================================================
 # BUILD PERSON INDEX
 # ==========================================================
 
@@ -23,6 +48,9 @@ def build_person_index(persons):
 
     for p in persons:
         full_name = p.get("AuthorFullName", "")
+
+        if not full_name:
+            continue
 
         norm = normalize_name(full_name)
         person_index[norm].append(p)
@@ -51,7 +79,13 @@ def batch_process(persons, wos_author_pairs):
     new_author_groups = defaultdict(list)
 
     for pair in wos_author_pairs:
-        author_full = pair["author"]
+
+        author_full = extract_author_name(pair)
+        ut_value = extract_ut(pair)
+
+        if not author_full:
+            continue
+
         norm = normalize_name(author_full)
 
         # ==================================================
@@ -72,7 +106,7 @@ def batch_process(persons, wos_author_pairs):
             matched.append({
                 "PersonID": person.get("PersonID", ""),
                 "AuthorFullName": author_full,
-                "UT": pair["ut"],
+                "UT": ut_value,
                 "OrganizationID": person.get("OrganizationID", ""),
                 "match_type": "exact",
             })
@@ -88,9 +122,8 @@ def batch_process(persons, wos_author_pairs):
             needs_review.append({
                 "PersonID": "",
                 "AuthorFullName": author_full,
-                "UT": pair["ut"],
+                "UT": ut_value,
                 "match_type": "multiple",
-                "candidates": candidates,
                 "suggested_pid": top.get("PersonID", ""),
                 "suggested_name": top.get("AuthorFullName", ""),
                 "OrganizationID": top.get("OrganizationID", ""),
@@ -105,7 +138,7 @@ def batch_process(persons, wos_author_pairs):
         new_author_groups[group_key].append({
             "PersonID": "",
             "AuthorFullName": author_full,
-            "UT": pair["ut"],
+            "UT": ut_value,
             "match_type": "new",
             "OrganizationID": "",
             "group_key": group_key,
