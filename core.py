@@ -75,7 +75,6 @@ def get_initials_key(name: str) -> str:
     if ',' not in norm:
         return norm
     surname, given = norm.split(',', 1)
-    # Extract just the first letter of each part of the given name
     initials = " ".join([part[0] for part in given.split() if part])
     return f"{surname.strip()} {initials}".strip()
 
@@ -136,7 +135,6 @@ def parse_org_hierarchy(csv_content: str) -> Dict[str, str]:
 def parse_wos_csv(csv_content: str) -> List[Dict]:
     """Parses WoS Export."""
     f = io.StringIO(csv_content.strip())
-    # Detect tab vs comma
     sample = csv_content[:2000]
     dialect = 'excel-tab' if '\t' in sample else 'excel'
     reader = csv.DictReader(f, dialect=dialect)
@@ -261,8 +259,14 @@ class StagingDB:
         """)
         self.conn.commit()
 
-# ... rest of persistence and export functions (build_upload_csv, build_review_excel)
-# remain consistent with previous versions.
+    def upsert_person(self, pid: str, full_name: str, norm: str, is_new: bool = True):
+        self.conn.execute(
+            "INSERT OR IGNORE INTO persons VALUES (?,?,?,?,?)",
+            (pid, full_name, norm, int(is_new), datetime.now().isoformat(timespec="seconds"))
+        )
+        self.conn.commit()
+
+# ─── Export Formatters ────────────────────────────────────────────────────────
 
 def build_upload_csv(affiliations: List[Dict]) -> str:
     output = io.StringIO()
@@ -279,6 +283,15 @@ def build_upload_csv(affiliations: List[Dict]) -> str:
             "Timestamp": datetime.now().isoformat()
         })
     return output.getvalue()
+
+def build_audit_json(summary: dict, new_persons: list) -> str:
+    """Generates the audit JSON structure for export."""
+    data = {
+        "generated_at": datetime.now().isoformat(),
+        "summary": summary,
+        "new_persons": new_persons
+    }
+    return json.dumps(data, indent=2, ensure_ascii=False)
 
 def build_review_excel(results: List[Dict], org_hierarchy: Dict[str, str]):
     import openpyxl
