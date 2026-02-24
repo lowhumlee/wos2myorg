@@ -209,7 +209,7 @@ with st.sidebar:
     cfg["muv_affiliation_patterns"] = [p.strip() for p in pat_text.splitlines() if p.strip()]
 
     st.markdown("---")
-    if st.button("🔄 Reset All", use_container_width=True):
+    if st.button("🔄 Reset All", width='stretch'):
         reset_state()
         st.rerun()
 
@@ -273,14 +273,14 @@ with tab_load:
         res_file.seek(0)
         import pandas as pd
         with st.expander(f"Preview: Researchers ({len(df_preview)} rows)", expanded=False):
-            st.dataframe(pd.DataFrame(df_preview).head(15), use_container_width=True)
+            st.dataframe(pd.DataFrame(df_preview).head(15), width='stretch')
 
     if org_file:
         org_file.seek(0)
         df_org_preview = list(csv.DictReader(io.StringIO(org_file.read().decode("utf-8-sig"))))
         org_file.seek(0)
         with st.expander(f"Preview: Organizations ({len(df_org_preview)} orgs)", expanded=False):
-            st.dataframe(pd.DataFrame(df_org_preview), use_container_width=True)
+            st.dataframe(pd.DataFrame(df_org_preview), width='stretch')
 
     if wos_file:
         wos_file.seek(0)
@@ -289,15 +289,19 @@ with tab_load:
         with st.expander(f"Preview: WoS Records ({len(wos_preview)} records)", expanded=False):
             if wos_preview:
                 df_wos_prev = pd.DataFrame(wos_preview)
-                # Strip whitespace from column names (WoS exports sometimes add spaces)
-                df_wos_prev.columns = [c.strip() for c in df_wos_prev.columns]
+                # Strip whitespace and drop None columns (WoS trailing delimiter bug)
+                df_wos_prev.columns = [
+                    c.strip() if c is not None else "__EMPTY__"
+                    for c in df_wos_prev.columns
+                ]
+                df_wos_prev = df_wos_prev[[c for c in df_wos_prev.columns if c != "__EMPTY__"]]
                 # Show UT + AF if present, otherwise show all columns
                 preferred = [c for c in ["UT", "AF"] if c in df_wos_prev.columns]
                 st.caption(f"Detected columns: {list(df_wos_prev.columns)}")
                 if preferred:
-                    st.dataframe(df_wos_prev[preferred].head(10), use_container_width=True)
+                    st.dataframe(df_wos_prev[preferred].head(10), width='stretch')
                 else:
-                    st.dataframe(df_wos_prev.head(10), use_container_width=True)
+                    st.dataframe(df_wos_prev.head(10), width='stretch')
             else:
                 st.warning("No rows found in WoS file.")
 
@@ -307,7 +311,7 @@ with tab_load:
         "🚀  Detect MUV Authors",
         type="primary",
         disabled=not (wos_file and res_file and org_file),
-        use_container_width=True,
+        width='stretch',
     )
 
     if proc_btn:
@@ -435,7 +439,7 @@ with tab_review:
                 "UT": r["UT"],
                 "OrgID": r["OrganizationID"],
             } for r in confirmed_auto])
-            st.dataframe(df_conf, use_container_width=True, height=200)
+            st.dataframe(df_conf, width='stretch', height=200)
 
         # ── Needs review section
         st.markdown(f'<div class="sec-head">🔍 Needs Human Decision ({len(needs_review)} entries)</div>', unsafe_allow_html=True)
@@ -553,7 +557,7 @@ with tab_review:
 
         st.markdown("---")
 
-        if st.button("💾  Save Decisions & Prepare Output", type="primary", use_container_width=True):
+        if st.button("💾  Save Decisions & Prepare Output", type="primary", width='stretch'):
             # Merge auto-confirmed + user decisions
             output_rows = []
             rejected_rows = []
@@ -643,12 +647,12 @@ with tab_output:
             data=csv_bytes,
             file_name=f"upload_ready_{ts}.csv",
             mime="text/csv",
-            use_container_width=True,
+            width='stretch',
         )
 
         with st.expander("Preview upload CSV", expanded=False):
             import pandas as pd
-            st.dataframe(pd.DataFrame(output_rows).head(30), use_container_width=True)
+            st.dataframe(pd.DataFrame(output_rows).head(30), width='stretch')
 
         st.markdown("---")
 
@@ -664,7 +668,7 @@ with tab_output:
                     data=excel_bytes,
                     file_name=f"review_{ts}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
+                    width='stretch',
                 )
             else:
                 st.warning("openpyxl not installed — Excel export unavailable.")
@@ -688,7 +692,7 @@ with tab_output:
             data=audit_json.encode("utf-8"),
             file_name=f"audit_{ts}.json",
             mime="application/json",
-            use_container_width=True,
+            width='stretch',
         )
 
         with st.expander("Preview audit log", expanded=False):
@@ -730,7 +734,7 @@ with tab_output:
                 data=merged_csv,
                 file_name=f"upload_ready_merged_{ts}.csv",
                 mime="text/csv",
-                use_container_width=True,
+                width='stretch',
             )
 
 
@@ -796,7 +800,7 @@ with tab_stats:
                 [{"Affiliation": k, "Count": v} for k, v in
                  sorted(affil_counts.items(), key=lambda x: -x[1])]
             )
-            st.dataframe(df_affils, use_container_width=True)
+            st.dataframe(df_affils, width='stretch')
 
         st.markdown("---")
 
@@ -807,7 +811,7 @@ with tab_stats:
             "UT": p["ut"],
             "MUV Affiliations": " | ".join(p["muv_affils"]),
         } for p in muv_pairs])
-        st.dataframe(df_pairs, use_container_width=True, height=300)
+        st.dataframe(df_pairs, width='stretch', height=300)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
