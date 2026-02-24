@@ -125,13 +125,15 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
 
         persons[pid_str] = {
             "PersonID": pid_str,
+            "AuthorFullName": full_name, # Standard field name for the app
             "FullName": full_name,
             "NormName": norm,
             "Surname": norm_last,
             "GivenName": norm_first,
             "Initials": initials,
             "IsInitialsOnly": is_init,
-            "InitialsKey": get_initials_key(full_name)
+            "InitialsKey": get_initials_key(full_name),
+            "OrganizationID": row.get("OrganizationID", ""),
         }
     return list(persons.values()), max_pid
 
@@ -177,26 +179,33 @@ def extract_muv_author_pairs(wos_records: List[Dict], cfg: dict) -> List[Dict]:
                 authors = [a.strip() for a in authors_str.split(';')]
                 for auth in authors:
                     extracted.append({
+                        "author_full": auth, # Required by app.py and cli.py
                         "AuthorName": auth,
                         "RawAffil": affil_str.strip(),
-                        "UT": ut
+                        "muv_affils": [affil_str.strip()], # Required by app.py
+                        "ut": ut, # Required by app.py and cli.py
+                        "UT": ut,
                     })
     return extracted
 
 
 # ─── Matching Engine ─────────────────────────────────────────────────────────
 
-def match_person(author_name: str, person_index: List[Dict], threshold: float) -> Dict:
+def match_person(author_name: str, person_index: List[Dict], threshold: float | dict) -> tuple[str, list]:
     """
     Improved author matching logic with initial containment and strict rules.
+    Returns (match_type, candidates_list).
     """
+    if isinstance(threshold, dict):
+        threshold = float(threshold.get("fuzzy_threshold", 0.85))
+
     norm_auth = normalize_name(author_name)
     if ',' not in norm_auth:
         # Fallback for names without comma
         for p in person_index:
             if p["NormName"] == norm_auth:
-                return {"status": "EXACT", "match": p, "score": 1.0}
-        return {"status": "NEW", "match": None, "score": 0.0}
+                return "exact", [(1.0, p, 1.0)]
+        return "new", []
 
     auth_sur, auth_given = norm_auth.split(',', 1)
     auth_sur = auth_sur.strip()
@@ -210,7 +219,7 @@ def match_person(author_name: str, person_index: List[Dict], threshold: float) -
     for p in person_index:
         # Exact string match is always top priority
         if p["NormName"] == norm_auth:
-            return {"status": "EXACT", "match": p, "score": 1.0}
+            return "exact", [(1.0, p, 1.0)]
         
         # Must have same surname
         if p["Surname"] != auth_sur:
@@ -230,20 +239,20 @@ def match_person(author_name: str, person_index: List[Dict], threshold: float) -
         if auth_initials.startswith(p["Initials"]) or p["Initials"].startswith(auth_initials):
             # We give a high score for initials match
             score = 0.95 if auth_initials == p["Initials"] else 0.90
-            candidates.append({"status": "AMBIGUOUS", "match": p, "score": score})
+            candidates.append((score, p, score))
             continue
 
         # Fallback to fuzzy similarity for full names (if neither is initials-only)
         if not auth_is_init and not p["IsInitialsOnly"]:
             score = name_similarity(norm_auth, p["NormName"])
             if score >= threshold:
-                candidates.append({"status": "AMBIGUOUS", "match": p, "score": score})
+                candidates.append((score, p, score))
 
     if candidates:
-        candidates.sort(key=lambda x: x["score"], reverse=True)
-        return candidates[0]
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return "fuzzy", candidates
 
-    return {"status": "NEW", "match": None, "score": 0.0}
+    return "new", []
 
 
 def group_new_authors(new_records: List[Dict]) -> List[Dict]:
@@ -252,13 +261,13 @@ def group_new_authors(new_records: List[Dict]) -> List[Dict]:
     Rule 3: Prefer variant with most complete initials.
     """
     # Sort by name length descending so we find more complete names first
-    sorted_records = sorted(new_records, key=lambda x: len(x["AuthorName"]), reverse=True)
+    sorted_records = sorted(new_records, key=lambda x: len(x.get("author_full", "")), reverse=True)
     
-    canonical_map = {} # norm_surname -> list of canonical names
+    canonical_map = {} # norm_surname -> list of (canonical_name, initials)
     
     processed = []
     for rec in sorted_records:
-        name = rec["AuthorName"]
+        name = rec.get("author_full", "")
         norm = normalize_name(name)
         if ',' not in norm:
             rec["GroupedName"] = name
@@ -297,25 +306,96 @@ def group_new_authors(new_records: List[Dict]) -> List[Dict]:
 def batch_process(muv_pairs: List[Dict], person_index: List[Dict], orgs: Dict, cfg: dict, start_pid: int = 9000):
     """
     Processes extracted pairs against the person index.
-    Signature matched to app.py expectations.
+    Returns a dict with 'confirmed', 'needs_review', and 'new_persons'.
     """
-    results = []
-    new_authors_buffer = []
+    confirmed = []
+    needs_review = []
+    new_persons_staged = {} # norm -> entry
+    
+    pid_counter = start_pid
+    threshold = float(cfg.get("fuzzy_threshold", 0.85))
 
+    # Group by author first to apply grouping logic
+    author_groups = defaultdict(list)
     for pair in muv_pairs:
-        m = match_person(pair["AuthorName"], person_index, cfg.get("fuzzy_threshold", 0.85))
-        res = {**pair, "Status": m["status"], "Match": m["match"], "Score": m["score"]}
+        norm = normalize_name(pair["author_full"])
+        author_groups[norm].append(pair)
+
+    for norm, pairs in author_groups.items():
+        author_full = pairs[0]["author_full"]
+        match_type, candidates = match_person(author_full, person_index, threshold)
         
-        if m["status"] == "NEW":
-            new_authors_buffer.append(res)
+        if match_type == "exact":
+            p = candidates[0][1]
+            for pair in pairs:
+                confirmed.append({
+                    **pair,
+                    "match_type": "exact",
+                    "PersonID": p["PersonID"],
+                    "AuthorFullName": p["AuthorFullName"],
+                    "OrganizationID": p.get("OrganizationID", ""),
+                })
+        elif match_type == "fuzzy":
+            for pair in pairs:
+                needs_review.append({
+                    **pair,
+                    "match_type": "fuzzy",
+                    "norm": norm,
+                    "candidates": candidates,
+                    "suggested_pid": candidates[0][1]["PersonID"],
+                    "suggested_name": candidates[0][1]["AuthorFullName"],
+                    "AuthorFullName": author_full,
+                })
         else:
-            results.append(res)
+            # Check if this "new" author can be grouped with another new author
+            # For batch process, we'll simplify: if we haven't seen a variant, it's a new canonical
+            found_canonical = None
+            sur, given = author_full.lower().split(',', 1) if ',' in author_full else (author_full.lower(), "")
+            sur = re.sub(r'[^a-z0-9\s]', '', strip_diacritics(sur)).strip()
+            initials = "".join([p[0] for p in given.split() if p])
+            
+            for staged_norm, staged_entry in new_persons_staged.items():
+                s_sur = staged_entry["surname"]
+                s_init = staged_entry["initials"]
+                if sur == s_sur and initials and s_init and initials[0] == s_init[0]:
+                    if initials.startswith(s_init) or s_init.startswith(initials):
+                        found_canonical = staged_entry
+                        # If current name is longer/more complete, update canonical
+                        if len(author_full) > len(staged_entry["AuthorFullName"]):
+                            staged_entry["AuthorFullName"] = author_full
+                            staged_entry["initials"] = initials
+                        break
+            
+            if found_canonical:
+                pid = found_canonical["PersonID"]
+                resolved_name = found_canonical["AuthorFullName"]
+            else:
+                pid = str(pid_counter)
+                pid_counter += 1
+                resolved_name = author_full
+                new_persons_staged[norm] = {
+                    "PersonID": pid, 
+                    "AuthorFullName": author_full,
+                    "surname": sur,
+                    "initials": initials
+                }
+            
+            for pair in pairs:
+                needs_review.append({
+                    **pair,
+                    "match_type": "new",
+                    "norm": norm,
+                    "PersonID": pid,
+                    "AuthorFullName": resolved_name,
+                    "suggested_pid": pid,
+                    "suggested_name": resolved_name,
+                })
 
-    if new_authors_buffer:
-        grouped_new = group_new_authors(new_authors_buffer)
-        results.extend(grouped_new)
-
-    return results
+    return {
+        "confirmed": confirmed,
+        "needs_review": needs_review,
+        "new_persons": list(new_persons_staged.values())
+    }
 
 
 # ─── Persistence & Helpers ────────────────────────────────────────────────────
@@ -337,6 +417,9 @@ class StagingDB:
             CREATE TABLE IF NOT EXISTS decisions (
                 PersonID TEXT, DecisionType TEXT, Detail TEXT, Timestamp TEXT
             );
+            CREATE TABLE IF NOT EXISTS rejected (
+                AuthorFullName TEXT, UT TEXT, Reason TEXT, Timestamp TEXT
+            );
         """)
         self.conn.commit()
 
@@ -351,6 +434,13 @@ class StagingDB:
         self.conn.execute(
             "INSERT INTO decisions VALUES (?,?,?,?)",
             (pid, dtype, detail, datetime.now().isoformat(timespec="seconds"))
+        )
+        self.conn.commit()
+
+    def log_rejected(self, author: str, ut: str, reason: str):
+        self.conn.execute(
+            "INSERT INTO rejected VALUES (?,?,?,?)",
+            (author, ut, reason, datetime.now().isoformat(timespec="seconds"))
         )
         self.conn.commit()
 
@@ -381,20 +471,37 @@ def build_audit_json(summary: dict, new_persons: list) -> str:
     }
     return json.dumps(data, indent=2, ensure_ascii=False)
 
-def build_review_excel(results: List[Dict], org_hierarchy: Dict[str, str]):
+def build_review_excel(results: List[Dict] | dict, org_hierarchy: Dict[str, str] = None):
     import openpyxl
     from openpyxl.styles import Font, PatternFill
+    
+    # Handle both list and dict inputs
+    if isinstance(results, dict):
+        # Flatten the dict result into a list of all items
+        all_items = results.get("confirmed", []) + results.get("needs_review", [])
+    else:
+        all_items = results
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Author Review"
     headers = ["Status", "WoS Author", "Detected PersonID", "Existing Name", "Match Score", "UT", "Affiliation", "OrganizationID", "APPROVED"]
     ws.append(headers)
-    for r in results:
-        m = r.get("Match")
+    
+    for r in all_items:
+        # Check for candidates or direct match
+        m_pid = r.get("PersonID", "")
+        m_name = r.get("AuthorFullName", "")
+        score = r.get("Score", 1.0 if r.get("match_type") == "exact" else 0.0)
+        
         ws.append([
-            r["Status"], r.get("GroupedName", r["AuthorName"]),
-            m["PersonID"] if m else "", m["FullName"] if m else "",
-            r["Score"], r["UT"], r["RawAffil"], "", "YES" if r["Status"] == "EXACT" else "PENDING"
+            r.get("match_type", "UNKNOWN").upper(), 
+            r.get("author_full", r.get("AuthorName", "")),
+            m_pid, m_name,
+            score, r.get("UT", r.get("ut", "")), 
+            "; ".join(r.get("muv_affils", [])) if isinstance(r.get("muv_affils"), list) else r.get("RawAffil", ""),
+            r.get("OrganizationID", ""), 
+            "YES" if r.get("match_type") == "exact" else "PENDING"
         ])
     out = io.BytesIO()
     wb.save(out)
