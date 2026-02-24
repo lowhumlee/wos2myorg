@@ -109,13 +109,28 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
         if pid_str in persons:
             continue
         
-        full_name = f"{row.get('LastName', '')}, {row.get('FirstName', '')}"
+        first_name = row.get('FirstName', '')
+        last_name = row.get('LastName', '')
+        full_name = f"{last_name}, {first_name}"
         norm = normalize_name(full_name)
         
+        # Analyze name parts for better matching
+        norm_last, norm_first = last_name.lower().strip(), first_name.lower().strip()
+        norm_last = re.sub(r'[^a-z0-9\s]', '', strip_diacritics(norm_last))
+        norm_first = re.sub(r'[^a-z0-9\s]', '', strip_diacritics(norm_first))
+        
+        # Is it initials only? (e.g., "N. R.")
+        is_init = all(len(p) == 1 for p in norm_first.split())
+        initials = "".join([p[0] for p in norm_first.split() if p])
+
         persons[pid_str] = {
             "PersonID": pid_str,
             "FullName": full_name,
             "NormName": norm,
+            "Surname": norm_last,
+            "GivenName": norm_first,
+            "Initials": initials,
+            "IsInitialsOnly": is_init,
             "InitialsKey": get_initials_key(full_name)
         }
     return list(persons.values()), max_pid
@@ -172,22 +187,57 @@ def extract_muv_author_pairs(wos_records: List[Dict], cfg: dict) -> List[Dict]:
 # ─── Matching Engine ─────────────────────────────────────────────────────────
 
 def match_person(author_name: str, person_index: List[Dict], threshold: float) -> Dict:
+    """
+    Improved author matching logic with initial containment and strict rules.
+    """
     norm_auth = normalize_name(author_name)
-    auth_initials = get_initials_key(author_name)
+    if ',' not in norm_auth:
+        # Fallback for names without comma
+        for p in person_index:
+            if p["NormName"] == norm_auth:
+                return {"status": "EXACT", "match": p, "score": 1.0}
+        return {"status": "NEW", "match": None, "score": 0.0}
+
+    auth_sur, auth_given = norm_auth.split(',', 1)
+    auth_sur = auth_sur.strip()
+    auth_given = auth_given.strip()
+    
+    auth_initials = "".join([p[0] for p in auth_given.split() if p])
+    auth_is_init = all(len(p) == 1 for p in auth_given.split())
     
     candidates = []
 
     for p in person_index:
+        # Exact string match is always top priority
         if p["NormName"] == norm_auth:
             return {"status": "EXACT", "match": p, "score": 1.0}
         
-        if p["InitialsKey"] == auth_initials:
-            candidates.append({"status": "AMBIGUOUS", "match": p, "score": 0.95})
+        # Must have same surname
+        if p["Surname"] != auth_sur:
+            continue
+            
+        # First initial must match
+        if not p["Initials"] or not auth_initials or p["Initials"][0] != auth_initials[0]:
             continue
 
-        score = name_similarity(norm_auth, p["NormName"])
-        if score >= threshold:
+        # Rule 1: Initial-Only Matching Rule
+        # If WoS author is initials-only, only match against registry entries that are also initials-only.
+        if auth_is_init and not p["IsInitialsOnly"]:
+            continue
+            
+        # Rule 2: Initial Containment Logic
+        # Allow grouping if one set of initials is a prefix of the other (e.g., N vs NR)
+        if auth_initials.startswith(p["Initials"]) or p["Initials"].startswith(auth_initials):
+            # We give a high score for initials match
+            score = 0.95 if auth_initials == p["Initials"] else 0.90
             candidates.append({"status": "AMBIGUOUS", "match": p, "score": score})
+            continue
+
+        # Fallback to fuzzy similarity for full names (if neither is initials-only)
+        if not auth_is_init and not p["IsInitialsOnly"]:
+            score = name_similarity(norm_auth, p["NormName"])
+            if score >= threshold:
+                candidates.append({"status": "AMBIGUOUS", "match": p, "score": score})
 
     if candidates:
         candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -197,17 +247,48 @@ def match_person(author_name: str, person_index: List[Dict], threshold: float) -
 
 
 def group_new_authors(new_records: List[Dict]) -> List[Dict]:
-    groups = defaultdict(list)
-    for rec in new_records:
-        ikey = get_initials_key(rec["AuthorName"])
-        groups[ikey].append(rec)
+    """
+    Groups new authors that are variants of each other before insertion.
+    Rule 3: Prefer variant with most complete initials.
+    """
+    # Sort by name length descending so we find more complete names first
+    sorted_records = sorted(new_records, key=lambda x: len(x["AuthorName"]), reverse=True)
+    
+    canonical_map = {} # norm_surname -> list of canonical names
     
     processed = []
-    for ikey, items in groups.items():
-        canonical_name = max([item["AuthorName"] for item in items], key=len)
-        for item in items:
-            item["GroupedName"] = canonical_name
-            processed.append(item)
+    for rec in sorted_records:
+        name = rec["AuthorName"]
+        norm = normalize_name(name)
+        if ',' not in norm:
+            rec["GroupedName"] = name
+            processed.append(rec)
+            continue
+            
+        sur, given = norm.split(',', 1)
+        sur = sur.strip()
+        given = given.strip()
+        initials = "".join([p[0] for p in given.split() if p])
+        
+        found_canonical = None
+        if sur in canonical_map:
+            for canon_name, canon_initials in canonical_map[sur]:
+                # If initials match or contain each other and first initial is same
+                if initials and canon_initials and initials[0] == canon_initials[0]:
+                    if initials.startswith(canon_initials) or canon_initials.startswith(initials):
+                        found_canonical = canon_name
+                        break
+        
+        if found_canonical:
+            rec["GroupedName"] = found_canonical
+        else:
+            rec["GroupedName"] = name
+            if sur not in canonical_map:
+                canonical_map[sur] = []
+            canonical_map[sur].append((name, initials))
+            
+        processed.append(rec)
+        
     return processed
 
 
@@ -263,6 +344,13 @@ class StagingDB:
         self.conn.execute(
             "INSERT OR IGNORE INTO persons VALUES (?,?,?,?,?)",
             (pid, full_name, norm, int(is_new), datetime.now().isoformat(timespec="seconds"))
+        )
+        self.conn.commit()
+    
+    def log_decision(self, pid: str, dtype: str, detail: str):
+        self.conn.execute(
+            "INSERT INTO decisions VALUES (?,?,?,?)",
+            (pid, dtype, detail, datetime.now().isoformat(timespec="seconds"))
         )
         self.conn.commit()
 
