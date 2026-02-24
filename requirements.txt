@@ -1,0 +1,22 @@
+# WoS MUV Affiliation Ingestion Tool
+# Python 3.9+ required
+
+# Core (all stdlib-based — no network calls needed)
+# These are included in Python standard library:
+#   csv, io, json, re, sqlite3, unicodedata, difflib, collections, pathlib
+
+# Optional but strongly recommended:
+openpyxl>=3.1.0          # Excel review sheet generation and re-import
+streamlit>=1.32.0         # Streamlit GUI (app.py)
+
+# Optional enhanced CLI:
+rich>=13.0.0              # Pretty terminal output for CLI mode
+
+# Optional (install if available via pip):
+# rapidfuzz>=3.0.0        # Faster fuzzy matching (drop-in replacement for difflib)
+# unidecode>=1.3.6        # Enhanced diacritic normalization
+
+# Development / testing:
+# pytest>=7.0.0
+# pandas>=2.0.0           # Used only in Streamlit GUI previews
+pandas>=1.5.0

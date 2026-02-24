@@ -1,0 +1,17 @@
+{
+  "muv_affiliation_patterns": [
+    "medical university varna",
+    "med univ varna",
+    "mu varna",
+    "medical university of varna",
+    "муварна",
+    "медицинскиуниверситетварна",
+    "muv varna"
+  ],
+  "fuzzy_threshold": 0.85,
+  "interactive_mode": true,
+  "allow_multi_org": true,
+  "new_person_id_start": 9000,
+  "output_dir": "output",
+  "db_path": "staging.db"
+}

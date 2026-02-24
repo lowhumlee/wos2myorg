@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""
+cli.py — WoS MUV Affiliation Ingestion Tool · CLI Mode
+Medical University of Varna · Research Information Systems
+
+Usage:
+  python cli.py input100.csv --mode interactive
+  python cli.py input100.csv --mode batch
+  python cli.py input100.csv --mode batch --reimport review_filled.xlsx
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import io
+import json
+import logging
+import os
+import sys
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+from core import (
+    DEFAULT_CONFIG, load_config,
+    normalize_name, name_similarity,
+    build_person_index, parse_org_hierarchy, parse_wos_csv,
+    extract_muv_author_pairs, match_person, batch_process,
+    build_upload_csv, build_audit_json, build_review_excel,
+    StagingDB,
+)
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("wos_muv.cli")
+
+# ─── Try rich for prettier output ─────────────────────────────────────────────
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich import print as rprint
+    console = Console()
+    HAS_RICH = True
+except ImportError:
+    console = None
+    HAS_RICH = False
+
+
+def cprint(msg: str, style: str = ""):
+    if HAS_RICH:
+        console.print(msg, style=style) if style else console.print(msg)
+    else:
+        # Strip rich markup
+        import re
+        clean = re.sub(r"\[/?[^\]]+\]", "", msg)
+        print(clean)
+
+
+def banner():
+    cprint("\n[bold blue]╔══════════════════════════════════════════════════╗[/bold blue]")
+    cprint("[bold blue]║  WoS My Organization · MUV Ingestion Tool       ║[/bold blue]")
+    cprint("[bold blue]║  Medical University of Varna                     ║[/bold blue]")
+    cprint("[bold blue]╚══════════════════════════════════════════════════╝[/bold blue]\n")
+
+
+# ─── Interactive helpers ──────────────────────────────────────────────────────
+
+def prompt_fuzzy_resolve(author_full: str, candidates: list, ut: str) -> tuple[str, str]:
+    """
+    Ask user to choose between fuzzy candidates or create new.
+    Returns (person_id, full_name).
+    """
+    cprint(f"\n[bold yellow]⚠ Ambiguous match for:[/bold yellow] [cyan]{author_full}[/cyan]  (UT: {ut})")
+    cprint("  Possible matches in existing dataset:")
+    for i, (_, person, score) in enumerate(candidates, 1):
+        cprint(f"    {i}. {person['AuthorFullName']}  "
+               f"(PersonID {person['PersonID']}, score: {score:.2f})")
+    cprint(f"    {len(candidates)+1}. ➕  Create as NEW PERSON")
+
+    while True:
+        try:
+            raw = input(f"  Choice [1-{len(candidates)+1}]: ").strip()
+            idx = int(raw)
+            if 1 <= idx <= len(candidates):
+                p = candidates[idx - 1][1]
+                return p["PersonID"], p["AuthorFullName"]
+            elif idx == len(candidates) + 1:
+                return "NEW", author_full
+        except (ValueError, KeyboardInterrupt):
+            cprint("  Invalid input, please try again.")
+
+
+def prompt_org_selection(author_full: str, orgs: list[dict], multi: bool = True) -> list[str]:
+    """
+    Ask user to assign one or more OrganizationIDs.
+    Returns list of org ID strings.
+    """
+    cprint(f"\n[bold cyan]🏛  Select organization for:[/bold cyan] [green]{author_full}[/green]")
+
+    roots = [o for o in orgs if not o["ParentOrgaID"]]
+    children = [o for o in orgs if o["ParentOrgaID"]]
+    display = roots + children
+
+    for i, org in enumerate(display, 1):
+        indent = "    " if org["ParentOrgaID"] else ""
+        cprint(f"    {i:3}. {indent}[{org['OrganizationID']}] {org['OrganizationName']}")
+
+    n = len(display)
+    cprint(f"    {n+1:3}. 🔍  Search by keyword")
+    cprint(f"    {n+2:3}. ✏️   Enter custom OrganizationID")
+    cprint(f"      0. Skip (no organization)")
+
+    assigned: list[str] = []
+
+    def pick_one() -> str | None:
+        while True:
+            try:
+                raw = input(f"  Choice [0-{n+2}]: ").strip()
+                idx = int(raw)
+                if idx == 0:
+                    return None
+                elif 1 <= idx <= n:
+                    return display[idx - 1]["OrganizationID"]
+                elif idx == n + 1:
+                    kw = input("  Search keyword: ").strip().lower()
+                    hits = [o for o in orgs if kw in o["OrganizationName"].lower()]
+                    if not hits:
+                        cprint("  No matches found.")
+                        continue
+                    for j, o in enumerate(hits, 1):
+                        cprint(f"    {j}. [{o['OrganizationID']}] {o['OrganizationName']}")
+                    sub = input(f"  Select [1-{len(hits)}]: ").strip()
+                    try:
+                        return hits[int(sub) - 1]["OrganizationID"]
+                    except (ValueError, IndexError):
+                        continue
+                elif idx == n + 2:
+                    return input("  Custom OrganizationID: ").strip() or None
+            except (ValueError, KeyboardInterrupt):
+                cprint("  Invalid input.")
+
+    org_id = pick_one()
+    if org_id:
+        assigned.append(org_id)
+
+    if multi and org_id:
+        while True:
+            more = input("  Add another organization? [y/N]: ").strip().lower()
+            if more != "y":
+                break
+            extra = pick_one()
+            if extra and extra not in assigned:
+                assigned.append(extra)
+
+    return assigned
+
+
+# ─── Interactive mode ─────────────────────────────────────────────────────────
+
+def run_interactive(
+    wos_content: str,
+    researcher_content: str,
+    org_content: str,
+    cfg: dict,
+    source_file: str,
+    out_dir: str,
+) -> dict:
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    db = StagingDB(os.path.join(out_dir, cfg.get("db_path", "staging.db")))
+
+    person_index, max_pid = build_person_index(researcher_content)
+    orgs = parse_org_hierarchy(org_content)
+    records = parse_wos_csv(wos_content)
+    muv_pairs = extract_muv_author_pairs(records, cfg)
+
+    start_pid = max(int(cfg.get("new_person_id_start", 9000)), max_pid + 1)
+    pid_counter = start_pid
+    multi_org = cfg.get("allow_multi_org", True)
+    threshold = float(cfg.get("fuzzy_threshold", 0.85))
+
+    output_rows: list[dict] = []
+    rejected: list[dict] = []
+    new_persons_created: dict[str, dict] = {}
+    seen_pairs: set[tuple] = set()
+
+    author_groups: dict[str, list[dict]] = defaultdict(list)
+    for pair in muv_pairs:
+        norm = normalize_name(pair["author_full"])
+        author_groups[norm].append(pair)
+
+    total = len(author_groups)
+    cprint(f"\n[bold]Found {len(muv_pairs)} MUV author-document pairs "
+           f"across {total} unique authors.[/bold]")
+
+    for auth_idx, (norm, pairs) in enumerate(author_groups.items(), 1):
+        author_full = pairs[0]["author_full"]
+        cprint(f"\n[dim]─── Author {auth_idx}/{total} ───[/dim]")
+
+        match_type, candidates = match_person(author_full, person_index, {"fuzzy_threshold": threshold})
+
+        # Resolve identity
+        if match_type == "exact":
+            person = candidates[0][1]
+            pid = person["PersonID"]
+            resolved_name = person["AuthorFullName"]
+            cprint(f"  [green]✓ Exact match:[/green] {resolved_name} (PersonID {pid})")
+            db.log_decision(pid, "exact_match", author_full)
+
+        elif match_type == "fuzzy":
+            pid_raw, resolved_name = prompt_fuzzy_resolve(author_full, candidates, pairs[0]["ut"])
+            if pid_raw == "NEW":
+                match_type = "new"
+                pid = None
+            else:
+                pid = pid_raw
+                db.log_decision(pid, "fuzzy_resolved", f"Chose {pid} for: {author_full}")
+
+        if match_type == "new":
+            if norm in new_persons_created:
+                entry = new_persons_created[norm]
+                pid = entry["PersonID"]
+                resolved_name = entry["AuthorFullName"]
+            else:
+                pid = str(pid_counter)
+                pid_counter += 1
+                resolved_name = author_full
+                new_persons_created[norm] = {"PersonID": pid, "AuthorFullName": author_full}
+                db.upsert_person(pid, author_full, norm, is_new=True)
+                cprint(f"  [bold green]➕ NEW PERSON:[/bold green] {author_full} → PersonID {pid}")
+                db.log_decision(pid, "new_person", author_full)
+
+        # Org assignment for each UT
+        org_assigned_for_author: list[str] | None = None  # cache per author/run
+
+        for pair in pairs:
+            ut = pair["ut"]
+            muv_affils = pair["muv_affils"]
+            cprint(f"  [dim]UT: {ut} | MUV affils: {'; '.join(muv_affils[:2])}[/dim]")
+
+            # Determine org IDs
+            if match_type == "exact" and candidates:
+                org_ids = [candidates[0][1].get("OrganizationID", "")]
+                org_ids = [o for o in org_ids if o]
+                if not org_ids:
+                    org_ids = prompt_org_selection(author_full, orgs, multi_org)
+            else:
+                if org_assigned_for_author is None:
+                    cprint(f"  Affiliations detected: {'; '.join(muv_affils)}")
+                    org_assigned_for_author = prompt_org_selection(author_full, orgs, multi_org)
+                org_ids = org_assigned_for_author
+
+            if not org_ids:
+                org_ids = [""]
+
+            for org_id in org_ids:
+                key = (pid, ut, org_id)
+                if key in seen_pairs:
+                    db.log_rejected(author_full, ut, f"Duplicate pair {key}")
+                    rejected.append({"AuthorFullName": author_full, "UT": ut, "Reason": "Duplicate"})
+                    continue
+                seen_pairs.add(key)
+                output_rows.append({
+                    "PersonID": pid,
+                    "AuthorFullName": resolved_name,
+                    "UT": ut,
+                    "OrganizationID": org_id,
+                    "match_type": match_type,
+                })
+                db.add_affiliation(pid, ut, org_id, " | ".join(muv_affils), source_file)
+                db.log_decision(pid, "org_assigned", f"UT={ut} OrgID={org_id}")
+
+    # ── Write outputs
+    csv_path = os.path.join(out_dir, f"upload_ready_{ts}.csv")
+    csv_content = build_upload_csv(output_rows, source_file)
+    Path(csv_path).write_text(csv_content, encoding="utf-8")
+
+    new_persons_list = [{"PersonID": v["PersonID"], "AuthorFullName": v["AuthorFullName"]}
+                        for v in new_persons_created.values()]
+    audit_path = os.path.join(out_dir, f"audit_{ts}.json")
+    Path(audit_path).write_text(
+        build_audit_json(output_rows, output_rows, rejected, new_persons_list),
+        encoding="utf-8"
+    )
+
+    db.close()
+
+    cprint(f"\n[bold green]{'═'*50}[/bold green]")
+    cprint("[bold green]✅ Processing complete![/bold green]")
+    cprint(f"  Records in input     : {len(records)}")
+    cprint(f"  MUV author-doc pairs : {len(muv_pairs)}")
+    cprint(f"  Unique authors       : {len(author_groups)}")
+    cprint(f"  New persons created  : {len(new_persons_created)}")
+    cprint(f"  Output rows          : {len(output_rows)}")
+    cprint(f"  Upload CSV           : {csv_path}")
+    cprint(f"  Audit log            : {audit_path}")
+
+    return {
+        "records": len(records),
+        "muv_pairs": len(muv_pairs),
+        "new_persons": len(new_persons_created),
+        "output_rows": len(output_rows),
+        "csv_path": csv_path,
+        "audit_path": audit_path,
+    }
+
+
+# ─── Batch mode ───────────────────────────────────────────────────────────────
+
+def run_batch(
+    wos_content: str,
+    researcher_content: str,
+    org_content: str,
+    cfg: dict,
+    source_file: str,
+    out_dir: str,
+) -> dict:
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    db = StagingDB(os.path.join(out_dir, cfg.get("db_path", "staging.db")))
+
+    person_index, max_pid = build_person_index(researcher_content)
+    orgs = parse_org_hierarchy(org_content)
+    records = parse_wos_csv(wos_content)
+    muv_pairs = extract_muv_author_pairs(records, cfg)
+
+    start_pid = max(int(cfg.get("new_person_id_start", 9000)), max_pid + 1)
+
+    result = batch_process(muv_pairs, person_index, orgs, cfg, start_pid)
+    confirmed = result["confirmed"]
+    needs_review = result["needs_review"]
+    new_persons = result["new_persons"]
+
+    # Write confirmed rows to CSV
+    csv_path = os.path.join(out_dir, f"upload_ready_{ts}.csv")
+    Path(csv_path).write_text(build_upload_csv(confirmed, source_file), encoding="utf-8")
+
+    # Write review Excel
+    try:
+        excel_bytes = build_review_excel(needs_review, orgs)
+        excel_path = os.path.join(out_dir, f"review_{ts}.xlsx")
+        Path(excel_path).write_bytes(excel_bytes)
+        cprint(f"  Review Excel         : {excel_path}")
+    except ImportError:
+        excel_path = None
+        cprint("  [yellow]openpyxl not available — review Excel skipped.[/yellow]")
+
+    # Audit
+    new_list = [{"PersonID": v["PersonID"], "AuthorFullName": v["AuthorFullName"]}
+                for v in new_persons.values()]
+    audit_path = os.path.join(out_dir, f"audit_{ts}.json")
+    Path(audit_path).write_text(
+        build_audit_json(confirmed, confirmed, [], new_list),
+        encoding="utf-8"
+    )
+
+    db.close()
+
+    cprint(f"\n[bold green]✅ Batch processing complete![/bold green]")
+    cprint(f"  Records in input     : {len(records)}")
+    cprint(f"  MUV author-doc pairs : {len(muv_pairs)}")
+    cprint(f"  Auto-confirmed rows  : {len(confirmed)}")
+    cprint(f"  Needs human review   : {len(needs_review)}")
+    cprint(f"  New persons staged   : {len(new_persons)}")
+    cprint(f"  Upload CSV           : {csv_path}")
+    cprint(f"  Audit log            : {audit_path}")
+
+    return {
+        "records": len(records),
+        "muv_pairs": len(muv_pairs),
+        "confirmed": len(confirmed),
+        "needs_review": len(needs_review),
+        "new_persons": len(new_persons),
+        "csv_path": csv_path,
+        "excel_path": excel_path,
+        "audit_path": audit_path,
+    }
+
+
+def reimport_decisions(excel_path: str, confirmed_csv: str, source_file: str, out_dir: str) -> dict:
+    """Re-import user-validated review Excel and merge with auto-confirmed CSV."""
+    import openpyxl
+    wb = openpyxl.load_workbook(excel_path)
+    ws = wb["Review Candidates"]
+    headers = [cell.value for cell in ws[1]]
+
+    def col(name):
+        return headers.index(name)
+
+    extra_rows = []
+    skipped = 0
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[col("APPROVED")] and str(row[col("APPROVED")]).strip().upper() == "YES":
+            extra_rows.append({
+                "PersonID": str(row[col("PersonID")] or row[col("SuggestedPersonID")] or ""),
+                "AuthorFullName": str(row[col("AuthorFullName")] or ""),
+                "UT": str(row[col("UT")] or ""),
+                "OrganizationID": str(row[col("OrganizationID")] or ""),
+            })
+        else:
+            skipped += 1
+
+    # Read existing confirmed CSV
+    existing = Path(confirmed_csv).read_text(encoding="utf-8") if os.path.exists(confirmed_csv) else ""
+    merged_rows = []
+
+    # Parse existing
+    if existing:
+        reader = csv.DictReader(io.StringIO(existing))
+        for r in reader:
+            merged_rows.append(r)
+
+    merged_rows.extend(extra_rows)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    merged_path = os.path.join(out_dir, f"upload_ready_merged_{ts}.csv")
+    Path(merged_path).write_text(build_upload_csv(merged_rows, source_file), encoding="utf-8")
+
+    cprint(f"  Merged rows          : {len(merged_rows)}")
+    cprint(f"  Approved from review : {len(extra_rows)}")
+    cprint(f"  Skipped (NOT YES)    : {skipped}")
+    cprint(f"  Merged CSV           : {merged_path}")
+    return {"merged_path": merged_path, "merged_rows": len(merged_rows)}
+
+
+# ─── Entry Point ─────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="WoS My Organization · MUV Affiliation Ingestion Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Interactive mode (prompt for each ambiguous case):
+  python cli.py input100.csv
+
+  # Batch mode (auto-confirm exact matches, export review Excel):
+  python cli.py input100.csv --mode batch
+
+  # Re-import filled review Excel after batch mode:
+  python cli.py input100.csv --mode batch --reimport output/review_*.xlsx
+
+  # Custom file paths:
+  python cli.py data/wos_export.csv \\
+      --researcher data/ResearcherAndDocument.csv \\
+      --orgs data/OrganizationHierarchy.csv \\
+      --config config.json --out output/
+        """
+    )
+    parser.add_argument("input", help="WoS export CSV file")
+    parser.add_argument("--researcher", default="ResearcherAndDocument.csv",
+                        help="Existing ResearcherAndDocument.csv")
+    parser.add_argument("--orgs", default="OrganizationHierarchy.csv",
+                        help="OrganizationHierarchy.csv")
+    parser.add_argument("--config", default="config.json",
+                        help="JSON config file")
+    parser.add_argument("--mode", choices=["interactive", "batch"], default="interactive",
+                        help="Processing mode (default: interactive)")
+    parser.add_argument("--out", default="output",
+                        help="Output directory (default: output/)")
+    parser.add_argument("--reimport", default=None,
+                        help="Path to filled review Excel to re-import (batch mode only)")
+    parser.add_argument("--confirmed-csv", default=None,
+                        help="Auto-confirmed CSV from previous batch run (for reimport merge)")
+
+    args = parser.parse_args()
+    banner()
+
+    cfg = load_config(args.config)
+
+    def read_file(path: str) -> str:
+        if not os.path.exists(path):
+            cprint(f"[bold red]Error:[/bold red] File not found: {path}")
+            sys.exit(1)
+        return Path(path).read_text(encoding="utf-8-sig")
+
+    wos_content = read_file(args.input)
+    researcher_content = read_file(args.researcher)
+    org_content = read_file(args.orgs)
+    source_file = os.path.basename(args.input)
+
+    if args.reimport:
+        if not args.confirmed_csv:
+            cprint("[yellow]Note: --confirmed-csv not provided; reimport-only mode.[/yellow]")
+        cprint(f"\n[bold]Re-importing review decisions from:[/bold] {args.reimport}")
+        reimport_decisions(args.reimport, args.confirmed_csv or "", source_file, args.out)
+        return
+
+    if args.mode == "interactive":
+        run_interactive(wos_content, researcher_content, org_content, cfg, source_file, args.out)
+    else:
+        run_batch(wos_content, researcher_content, org_content, cfg, source_file, args.out)
+
+
+if __name__ == "__main__":
+    main()
