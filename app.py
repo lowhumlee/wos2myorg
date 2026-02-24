@@ -49,7 +49,6 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-/* ── Main header ── */
 .muv-header {
     background: linear-gradient(135deg, #0d2d4e 0%, #1a5276 60%, #2980b9 100%);
     border-radius: 14px;
@@ -60,7 +59,6 @@ st.markdown("""
 .muv-header h1 { color: #ffffff; margin: 0; font-size: 1.75rem; letter-spacing: -0.02em; }
 .muv-header .sub { color: #a8d4f5; margin: 0.35rem 0 0; font-size: 0.92rem; }
 
-/* ── Metric cards ── */
 .metric-grid { display: flex; gap: 1rem; margin: 1rem 0; flex-wrap: wrap; }
 .metric-card {
     flex: 1 1 140px;
@@ -78,7 +76,6 @@ st.markdown("""
 .num-orange { color: #d35400; }
 .num-yellow { color: #9a7d0a; }
 
-/* ── Badges ── */
 .badge {
     display: inline-block;
     padding: 3px 10px;
@@ -87,11 +84,11 @@ st.markdown("""
     font-weight: 700;
     letter-spacing: 0.03em;
 }
-.badge-new    { background: #d5f5e3; color: #1e8449; }
-.badge-exact  { background: #d6eaf8; color: #1a5276; }
-.badge-fuzzy  { background: #fef9e7; color: #9a7d0a; border: 1px solid #f9e79f; }
+.badge-new      { background: #d5f5e3; color: #1e8449; }
+.badge-exact    { background: #d6eaf8; color: #1a5276; }
+.badge-fuzzy    { background: #fef9e7; color: #9a7d0a; border: 1px solid #f9e79f; }
+.badge-initial  { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }
 
-/* ── Section headers ── */
 .sec-head {
     background: #eaf2fb;
     border-left: 5px solid #1a5276;
@@ -103,7 +100,6 @@ st.markdown("""
     font-size: 1rem;
 }
 
-/* ── Affiliation chips ── */
 .chip {
     display: inline-block;
     background: #eaf2fb;
@@ -115,38 +111,42 @@ st.markdown("""
     margin: 2px;
 }
 
-/* ── Upload zone ── */
 div[data-testid="stFileUploader"] {
     border: 2px dashed #aed6f1;
     border-radius: 10px;
     padding: 0.4rem;
 }
 
-/* ── Buttons ── */
-div.stButton > button {
-    border-radius: 8px;
-    font-weight: 600;
-}
+div.stButton > button { border-radius: 8px; font-weight: 600; }
 div.stButton > button[kind="primary"] {
     background: linear-gradient(135deg, #1a5276, #2980b9);
     border: none;
     color: white;
 }
 
-/* ── Expander ── */
 div[data-testid="stExpander"] {
     border: 1px solid #d0dde8 !important;
     border-radius: 10px !important;
     margin-bottom: 0.5rem;
 }
 
-/* ── Download button ── */
 div.stDownloadButton > button {
     border-radius: 8px;
     font-weight: 600;
     background: #1e8449;
     color: white;
     border: none;
+}
+
+.sibling-note {
+    background: #f0f4ff;
+    border: 1px solid #c5d0f0;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    color: #3a4a8a;
+    margin-bottom: 6px;
+    display: inline-block;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -160,9 +160,9 @@ _DEFAULTS = {
     "orgs": [],
     "wos_records": [],
     "muv_pairs": [],
-    "batch_result": None,        # dict from batch_process()
-    "decisions": {},             # norm -> decision dict (for interactive review)
-    "output_rows": [],           # finalized rows
+    "batch_result": None,
+    "decisions": {},
+    "output_rows": [],
     "rejected_rows": [],
     "processed": False,
     "finalized": False,
@@ -210,12 +210,12 @@ with st.sidebar:
     cfg["muv_affiliation_patterns"] = [p.strip() for p in pat_text.splitlines() if p.strip()]
 
     st.markdown("---")
-    if st.button("🔄 Reset All", width='stretch'):
+    if st.button("🔄 Reset All", use_container_width=True):
         reset_state()
         st.rerun()
 
     st.markdown("---")
-    st.caption("WoS MUV Ingestion Tool · v2.0")
+    st.caption("WoS MUV Ingestion Tool · v2.1")
     st.caption("Medical University of Varna")
 
 # ─── Header ──────────────────────────────────────────────────────────────────
@@ -267,42 +267,39 @@ with tab_load:
 
     st.markdown("---")
 
-    # Previews
     if res_file:
         res_file.seek(0)
         df_preview = list(csv.DictReader(io.StringIO(res_file.read().decode("utf-8-sig"))))
         res_file.seek(0)
-        import pandas as pd
         with st.expander(f"Preview: Researchers ({len(df_preview)} rows)", expanded=False):
-            st.dataframe(pd.DataFrame(df_preview).head(15), width='stretch')
+            st.dataframe(pd.DataFrame(df_preview).head(15), use_container_width=True)
 
     if org_file:
         org_file.seek(0)
         df_org_preview = list(csv.DictReader(io.StringIO(org_file.read().decode("utf-8-sig"))))
         org_file.seek(0)
         with st.expander(f"Preview: Organizations ({len(df_org_preview)} orgs)", expanded=False):
-            st.dataframe(pd.DataFrame(df_org_preview), width='stretch')
+            st.dataframe(pd.DataFrame(df_org_preview), use_container_width=True)
 
     if wos_file:
         wos_file.seek(0)
-        wos_preview = list(csv.DictReader(io.StringIO(wos_file.read().decode("utf-8-sig"))))
+        wos_preview_raw = wos_file.read().decode("utf-8-sig")
         wos_file.seek(0)
+        wos_preview = list(csv.DictReader(io.StringIO(wos_preview_raw)))
         with st.expander(f"Preview: WoS Records ({len(wos_preview)} records)", expanded=False):
             if wos_preview:
                 df_wos_prev = pd.DataFrame(wos_preview)
-                # Strip whitespace and drop None columns (WoS trailing delimiter bug)
                 df_wos_prev.columns = [
                     c.strip() if c is not None else "__EMPTY__"
                     for c in df_wos_prev.columns
                 ]
                 df_wos_prev = df_wos_prev[[c for c in df_wos_prev.columns if c != "__EMPTY__"]]
-                # Show UT + AF if present, otherwise show all columns
                 preferred = [c for c in ["UT", "AF"] if c in df_wos_prev.columns]
                 st.caption(f"Detected columns: {list(df_wos_prev.columns)}")
                 if preferred:
-                    st.dataframe(df_wos_prev[preferred].head(10), width='stretch')
+                    st.dataframe(df_wos_prev[preferred].head(10), use_container_width=True)
                 else:
-                    st.dataframe(df_wos_prev.head(10), width='stretch')
+                    st.dataframe(df_wos_prev.head(10), use_container_width=True)
             else:
                 st.warning("No rows found in WoS file.")
 
@@ -312,14 +309,14 @@ with tab_load:
         "🚀  Detect MUV Authors",
         type="primary",
         disabled=not (wos_file and res_file and org_file),
-        width='stretch',
+        use_container_width=True,
     )
 
     if proc_btn:
         cfg = st.session_state.cfg
 
         with st.spinner("Parsing files and detecting MUV-affiliated authors…"):
-            # Read file contents
+            # Read all file contents once
             res_file.seek(0)
             res_content = res_file.read().decode("utf-8-sig")
             org_file.seek(0)
@@ -328,20 +325,19 @@ with tab_load:
             wos_content = wos_file.read().decode("utf-8-sig")
 
             person_index, max_pid = build_person_index(res_content)
-            orgs = parse_org_hierarchy(org_content)
-            records = parse_wos_csv(wos_content)
-            muv_pairs = extract_muv_author_pairs(records, cfg)
+            orgs                  = parse_org_hierarchy(org_content)
+            records               = parse_wos_csv(wos_content)
+            muv_pairs             = extract_muv_author_pairs(records, cfg)
 
             start_pid = max(int(cfg["new_person_id_start"]), max_pid + 1)
-            batch_result = batch_process(muv_pairs, person_index, orgs, cfg, start_pid)
+
+            # ── KEY FIX: pass res_content so InitialAwareMatcher gets built ──
+            batch_result = batch_process(
+                muv_pairs, person_index, orgs, cfg, start_pid,
+                researcher_csv_content=res_content,
+            )
 
             # Build decisions dict for interactive review
-            decisions = {}
-            for norm, pairs in defaultdict(list, {
-                normalize_name(p["author_full"]): [] for p in muv_pairs
-            }).items():
-                pass  # rebuilt below
-
             decisions_by_norm: dict[str, dict] = {}
             for item in batch_result["needs_review"]:
                 norm = item["norm"]
@@ -349,43 +345,45 @@ with tab_load:
                     decisions_by_norm[norm] = {
                         **item,
                         "org_ids": [item.get("OrganizationID", "")],
-                        "resolved_pid": item.get("suggested_pid", ""),
-                        "resolved_name": item.get("suggested_name", item.get("AuthorFullName", "")),
+                        "resolved_pid":  item.get("suggested_pid", ""),
+                        "resolved_name": item.get("suggested_name",
+                                                   item.get("AuthorFullName", "")),
                         "approved": True,
                     }
 
-            st.session_state.person_index = person_index
-            st.session_state.max_pid = max_pid
-            st.session_state.orgs = orgs
-            st.session_state.wos_records = records
-            st.session_state.muv_pairs = muv_pairs
-            st.session_state.batch_result = batch_result
-            st.session_state.decisions = decisions_by_norm
-            st.session_state.processed = True
-            st.session_state.finalized = False
-            st.session_state.output_rows = []
+            st.session_state.person_index  = person_index
+            st.session_state.max_pid       = max_pid
+            st.session_state.orgs          = orgs
+            st.session_state.wos_records   = records
+            st.session_state.muv_pairs     = muv_pairs
+            st.session_state.batch_result  = batch_result
+            st.session_state.decisions     = decisions_by_norm
+            st.session_state.processed     = True
+            st.session_state.finalized     = False
+            st.session_state.output_rows   = []
 
-        # ── Summary metrics
         confirmed = batch_result["confirmed"]
-        review = batch_result["needs_review"]
-        new_p = batch_result["new_persons"]
+        review    = batch_result["needs_review"]
+        new_p     = batch_result["new_persons"]
 
-        n_exact = len([r for r in confirmed if r.get("match_type") == "exact"])
-        n_new = len([r for r in review if r.get("match_type") == "new"])
-        n_fuzzy = len([r for r in review if r.get("match_type") == "fuzzy"])
+        n_exact        = len([r for r in confirmed if r.get("match_type") == "exact"])
+        n_new          = len([r for r in review    if r.get("match_type") == "new"])
+        n_fuzzy        = len([r for r in review    if r.get("match_type") == "fuzzy"])
+        n_initial      = len([r for r in review    if r.get("match_type") == "initial_expansion"])
 
         st.markdown(f"""
 <div class="metric-grid">
   <div class="metric-card"><div class="num num-blue">{len(muv_pairs)}</div><div class="lbl">MUV Pairs Found</div></div>
   <div class="metric-card"><div class="num num-blue">{n_exact}</div><div class="lbl">Auto-Confirmed (exact)</div></div>
   <div class="metric-card"><div class="num num-green">{len(new_p)}</div><div class="lbl">New Persons Staged</div></div>
+  <div class="metric-card"><div class="num num-yellow">{n_initial}</div><div class="lbl">Initial-Expansion Matches</div></div>
   <div class="metric-card"><div class="num num-yellow">{n_fuzzy}</div><div class="lbl">Fuzzy / Ambiguous</div></div>
   <div class="metric-card"><div class="num num-orange">{len(review)}</div><div class="lbl">Needs Review</div></div>
 </div>
 """, unsafe_allow_html=True)
 
         if len(review) > 0:
-            st.info(f"➡️ **{len(review)} entries need your decision.** Go to Tab 2 to review and assign organizations.")
+            st.info(f"➡️ **{len(review)} entries need your decision.** Go to Tab 2 to review.")
         else:
             st.success("✅ All authors matched automatically. Go to Tab 3 to export.")
 
@@ -399,20 +397,21 @@ with tab_review:
         st.info("⬅️ Please load and process data in **Tab 1** first.")
     else:
         batch_result = st.session_state.batch_result
-        decisions = st.session_state.decisions
-        orgs = st.session_state.orgs
-        cfg = st.session_state.cfg
+        decisions    = st.session_state.decisions
+        orgs         = st.session_state.orgs
+        cfg          = st.session_state.cfg
 
         confirmed_auto = batch_result["confirmed"]
-        needs_review = batch_result["needs_review"]
+        needs_review   = batch_result["needs_review"]
 
-        # ── Filters
+        # ── Filters ──────────────────────────────────────────────────────────
         fcol1, fcol2, fcol3 = st.columns([2, 2, 1])
         with fcol1:
             ftype = st.selectbox("Filter", [
                 "All needing review",
                 "New persons only",
                 "Fuzzy matches only",
+                "Initial-expansion matches only",
             ])
         with fcol2:
             fsearch = st.text_input("Search author name", "")
@@ -420,8 +419,9 @@ with tab_review:
             st.markdown("<br>", unsafe_allow_html=True)
             show_exact = st.checkbox("Show auto-confirmed", value=False)
 
-        # ── Org dropdown options
-        org_map = {f"[{o['OrganizationID']}] {o['OrganizationName']}": o["OrganizationID"] for o in orgs}
+        # ── Org dropdown helpers ──────────────────────────────────────────────
+        org_map    = {f"[{o['OrganizationID']}] {o['OrganizationName']}": o["OrganizationID"]
+                      for o in orgs}
         org_labels = ["— none / skip —"] + list(org_map.keys())
 
         def label_for_org(oid: str) -> str:
@@ -430,97 +430,138 @@ with tab_review:
                     return lbl
             return org_labels[0]
 
-        # ── Show auto-confirmed section
+        # ── Auto-confirmed section ────────────────────────────────────────────
         if show_exact and confirmed_auto:
-            st.markdown('<div class="sec-head">✅ Auto-Confirmed (Exact Matches)</div>', unsafe_allow_html=True)
-            import pandas as pd
+            st.markdown('<div class="sec-head">✅ Auto-Confirmed (Exact Matches)</div>',
+                        unsafe_allow_html=True)
             df_conf = pd.DataFrame([{
                 "PersonID": r["PersonID"],
                 "Name": r["AuthorFullName"],
                 "UT": r["UT"],
                 "OrgID": r["OrganizationID"],
             } for r in confirmed_auto])
-            st.dataframe(df_conf, width='stretch', height=200)
+            st.dataframe(df_conf, use_container_width=True, height=200)
 
-        # ── Needs review section
-        st.markdown(f'<div class="sec-head">🔍 Needs Human Decision ({len(needs_review)} entries)</div>', unsafe_allow_html=True)
+        # ── Needs-review section ──────────────────────────────────────────────
+        st.markdown(
+            f'<div class="sec-head">🔍 Needs Human Decision ({len(needs_review)} entries)</div>',
+            unsafe_allow_html=True,
+        )
 
-        # Group by author (norm)
+        # Group by SiblingGroup first, then by norm within each group
+        # so variants of the same author appear adjacent in the UI
         by_norm: dict[str, list] = defaultdict(list)
         for item in needs_review:
             norm = item["norm"]
-            if ftype == "New persons only" and item["match_type"] != "new":
-                continue
-            if ftype == "Fuzzy matches only" and item["match_type"] != "fuzzy":
-                continue
-            if fsearch and fsearch.lower() not in item["AuthorFullName"].lower():
-                continue
+            mt   = item["match_type"]
+            if ftype == "New persons only"                 and mt != "new":               continue
+            if ftype == "Fuzzy matches only"               and mt != "fuzzy":             continue
+            if ftype == "Initial-expansion matches only"   and mt != "initial_expansion": continue
+            if fsearch and fsearch.lower() not in item["AuthorFullName"].lower():         continue
             by_norm[norm].append(item)
 
         if not by_norm:
             st.success("✅ No entries match the current filter.")
         else:
-            for norm, items in by_norm.items():
-                first = items[0]
-                mt = first["match_type"]
-                author = first["AuthorFullName"]
+            # Sort norms by SiblingGroup so siblings appear together
+            def sort_key(norm_items):
+                return norm_items[1][0].get("SiblingGroup", norm_items[1][0]["AuthorFullName"])
 
-                badge = {
-                    "new":   '<span class="badge badge-new">🆕 NEW PERSON</span>',
-                    "fuzzy": '<span class="badge badge-fuzzy">⚠ AMBIGUOUS MATCH</span>',
+            sorted_items = sorted(by_norm.items(), key=sort_key)
+
+            prev_sibling_group = None
+
+            for norm, items in sorted_items:
+                first  = items[0]
+                mt     = first["match_type"]
+                author = first["AuthorFullName"]
+                sibling_group = first.get("SiblingGroup", author)
+
+                # ── Sibling group divider ─────────────────────────────────────
+                if sibling_group != prev_sibling_group:
+                    prev_sibling_group = sibling_group
+                    # Count how many distinct norms share this sibling group
+                    sibling_norms = [
+                        n for n, its in sorted_items
+                        if its[0].get("SiblingGroup", its[0]["AuthorFullName"]) == sibling_group
+                    ]
+                    if len(sibling_norms) > 1:
+                        sibling_names = [by_norm[n][0]["AuthorFullName"]
+                                         for n in sibling_norms if n in by_norm]
+                        st.markdown(
+                            f'<div class="sibling-note">🔗 Sibling group: '
+                            f'{" · ".join(sibling_names)}</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                # ── Match type badge ──────────────────────────────────────────
+                badge_html = {
+                    "new":                '<span class="badge badge-new">🆕 NEW PERSON</span>',
+                    "fuzzy":              '<span class="badge badge-fuzzy">⚠ AMBIGUOUS MATCH</span>',
+                    "initial_expansion":  '<span class="badge badge-initial">🔤 INITIAL MATCH — please confirm</span>',
                 }.get(mt, "")
 
                 uts_str = ", ".join(i["UT"] for i in items)
-                label = f"{author}  —  {len(items)} document(s)"
+                label   = f"{author}  —  {len(items)} document(s)"
 
-                with st.expander(label, expanded=(mt == "fuzzy")):
-                    st.markdown(f"{badge}", unsafe_allow_html=True)
+                with st.expander(label, expanded=(mt in ("fuzzy", "initial_expansion"))):
+                    st.markdown(badge_html, unsafe_allow_html=True)
 
                     # MUV affiliation chips
-                    all_muv = []
+                    all_muv   = []
                     for it in items:
                         all_muv.extend(it["muv_affils"])
                     unique_muv = list(dict.fromkeys(all_muv))
                     chips_html = " ".join(f'<span class="chip">{a}</span>' for a in unique_muv[:4])
                     st.markdown(f"<small><b>MUV affiliations:</b> {chips_html}</small>",
                                 unsafe_allow_html=True)
+                    st.markdown(f"<small><b>Documents:</b> {uts_str}</small>",
+                                unsafe_allow_html=True)
 
-                    st.markdown(f"<small><b>Documents:</b> {uts_str}</small>", unsafe_allow_html=True)
-
-                    # ── Identity decision
+                    # ── Identity decision ─────────────────────────────────────
                     dec = decisions.get(norm, {
-                        "resolved_pid": first.get("suggested_pid", ""),
+                        "resolved_pid":  first.get("suggested_pid", ""),
                         "resolved_name": first.get("AuthorFullName", ""),
-                        "org_ids": [""],
-                        "approved": True,
+                        "org_ids":       [""],
+                        "approved":      True,
                     })
 
                     id_col1, id_col2 = st.columns(2)
 
                     with id_col1:
-                        if mt == "fuzzy" and first.get("candidates"):
+                        # Both fuzzy AND initial_expansion show a candidate picker
+                        if mt in ("fuzzy", "initial_expansion") and first.get("candidates"):
                             cands = first["candidates"]
-                            cand_labels = [f"[{p['PersonID']}] {p['AuthorFullName']} ({s:.2f})" for _, p, s in cands]
+                            cand_labels = [
+                                f"[{p['PersonID']}] {p['AuthorFullName']} ({s:.2f})"
+                                for _, p, s in cands
+                            ]
                             cand_labels.append("➕ Create as NEW PERSON")
+
+                            # Pre-select the top candidate
+                            default_idx = 0
+
                             choice = st.selectbox(
                                 f"Identity for {author}",
                                 cand_labels,
+                                index=default_idx,
                                 key=f"identity_{norm}",
                             )
                             if "NEW PERSON" in choice:
-                                dec["resolved_pid"] = first.get("suggested_pid", "")
+                                dec["resolved_pid"]  = first.get("suggested_pid", "")
                                 dec["resolved_name"] = author
-                                dec["match_type"] = "new"
+                                dec["match_type"]    = "new"
                             else:
                                 idx = cand_labels.index(choice)
                                 _, chosen_person, _ = cands[idx]
-                                dec["resolved_pid"] = chosen_person["PersonID"]
+                                dec["resolved_pid"]  = chosen_person["PersonID"]
                                 dec["resolved_name"] = chosen_person["AuthorFullName"]
-                                dec["match_type"] = "fuzzy_resolved"
+                                dec["match_type"]    = "resolved"
                         else:
                             dec["resolved_pid"] = st.text_input(
                                 "PersonID",
-                                value=dec.get("resolved_pid", first.get("suggested_pid", "")),
+                                value=dec.get("resolved_pid",
+                                              first.get("suggested_pid", "")),
                                 key=f"pid_{norm}",
                             )
                             dec["resolved_name"] = st.text_input(
@@ -530,13 +571,15 @@ with tab_review:
                             )
 
                     with id_col2:
-                        # ── Organization assignment
                         if cfg.get("allow_multi_org", True):
                             selected_labels = st.multiselect(
                                 "Assign organization(s)",
                                 options=list(org_map.keys()),
-                                default=[label_for_org(oid) for oid in dec.get("org_ids", [""])
-                                         if oid and label_for_org(oid) != org_labels[0]],
+                                default=[
+                                    label_for_org(oid)
+                                    for oid in dec.get("org_ids", [""])
+                                    if oid and label_for_org(oid) != org_labels[0]
+                                ],
                                 key=f"orgs_{norm}",
                             )
                             dec["org_ids"] = [org_map[lbl] for lbl in selected_labels] or [""]
@@ -548,23 +591,24 @@ with tab_review:
                             )
                             dec["org_ids"] = [org_map[sel]] if sel in org_map else [""]
 
-                    # ── Approve toggle
-                    dec["approved"] = st.checkbox("✅ Approve this entry", value=dec.get("approved", True),
-                                                  key=f"approve_{norm}")
-
+                    dec["approved"] = st.checkbox(
+                        "✅ Approve this entry",
+                        value=dec.get("approved", True),
+                        key=f"approve_{norm}",
+                    )
                     decisions[norm] = dec
 
         st.session_state.decisions = decisions
 
         st.markdown("---")
 
-        if st.button("💾  Save Decisions & Prepare Output", type="primary", width='stretch'):
-            # Merge auto-confirmed + user decisions
-            output_rows = []
+        if st.button("💾  Save Decisions & Prepare Output", type="primary",
+                     use_container_width=True):
+            output_rows   = []
             rejected_rows = []
             seen: set[tuple] = set()
 
-            # Auto-confirmed (exact)
+            # Auto-confirmed exact matches
             for row in confirmed_auto:
                 key = (row["PersonID"], row["UT"], row["OrganizationID"])
                 if key not in seen:
@@ -580,34 +624,43 @@ with tab_review:
                 dec = decisions.get(norm)
                 if not dec or not dec.get("approved", True):
                     for it in items:
-                        rejected_rows.append({"AuthorFullName": it["AuthorFullName"],
-                                              "UT": it["UT"], "Reason": "User rejected"})
+                        rejected_rows.append({
+                            "AuthorFullName": it["AuthorFullName"],
+                            "UT": it["UT"],
+                            "Reason": "User rejected",
+                        })
                     continue
 
-                pid = dec.get("resolved_pid", "")
+                pid           = dec.get("resolved_pid", "")
                 resolved_name = dec.get("resolved_name", items[0]["AuthorFullName"])
-                org_ids = dec.get("org_ids", [""])
+                org_ids       = dec.get("org_ids", [""])
 
                 for item in items:
                     for oid in org_ids:
                         key = (pid, item["UT"], oid)
                         if key in seen:
-                            rejected_rows.append({"AuthorFullName": resolved_name,
-                                                  "UT": item["UT"], "Reason": "Duplicate"})
+                            rejected_rows.append({
+                                "AuthorFullName": resolved_name,
+                                "UT": item["UT"],
+                                "Reason": "Duplicate",
+                            })
                             continue
                         seen.add(key)
                         output_rows.append({
-                            "PersonID": pid,
+                            "PersonID":       pid,
                             "AuthorFullName": resolved_name,
-                            "UT": item["UT"],
+                            "UT":             item["UT"],
                             "OrganizationID": oid,
-                            "match_type": dec.get("match_type", ""),
+                            "match_type":     dec.get("match_type", ""),
                         })
 
-            st.session_state.output_rows = output_rows
+            st.session_state.output_rows   = output_rows
             st.session_state.rejected_rows = rejected_rows
-            st.session_state.finalized = True
-            st.success(f"✅ {len(output_rows)} rows finalized ({len(rejected_rows)} rejected). Go to **Tab 3** to export.")
+            st.session_state.finalized     = True
+            st.success(
+                f"✅ {len(output_rows)} rows finalized "
+                f"({len(rejected_rows)} rejected). Go to **Tab 3** to export."
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -620,15 +673,14 @@ with tab_output:
     elif not st.session_state.finalized:
         st.warning("⚠️ Please save decisions in **Tab 2** before exporting.")
     else:
-        output_rows = st.session_state.output_rows
+        output_rows   = st.session_state.output_rows
         rejected_rows = st.session_state.rejected_rows
-        source_file = st.session_state.source_file
-        orgs = st.session_state.orgs
-        batch_result = st.session_state.batch_result
+        source_file   = st.session_state.source_file
+        orgs          = st.session_state.orgs
+        batch_result  = st.session_state.batch_result
 
         st.markdown('<div class="sec-head">📤 Export Files</div>', unsafe_allow_html=True)
 
-        # ── Metrics
         st.markdown(f"""
 <div class="metric-grid">
   <div class="metric-card"><div class="num num-green">{len(output_rows)}</div><div class="lbl">Upload-Ready Rows</div></div>
@@ -636,11 +688,16 @@ with tab_output:
 </div>
 """, unsafe_allow_html=True)
 
-        # ── Upload-ready CSV
+        # ── Upload-ready CSV ─────────────────────────────────────────────────
         st.markdown("#### 1. Upload-Ready CSV")
         st.markdown("Compatible with WoS My Organization bulk import format.")
 
-        csv_bytes = build_upload_csv(output_rows, source_file).encode("utf-8")
+        # Add SourceFile to each row before building CSV
+        rows_with_source = [
+            {**r, "OrgID": r.get("OrganizationID", ""), "SourceFile": source_file}
+            for r in output_rows
+        ]
+        csv_bytes = build_upload_csv(rows_with_source).encode("utf-8")
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         st.download_button(
@@ -648,20 +705,19 @@ with tab_output:
             data=csv_bytes,
             file_name=f"upload_ready_{ts}.csv",
             mime="text/csv",
-            width='stretch',
+            use_container_width=True,
         )
 
         with st.expander("Preview upload CSV", expanded=False):
-            import pandas as pd
-            st.dataframe(pd.DataFrame(output_rows).head(30), width='stretch')
+            st.dataframe(pd.DataFrame(output_rows).head(30), use_container_width=True)
 
         st.markdown("---")
 
-        # ── Review Excel (for batch workflows)
+        # ── Review Excel ─────────────────────────────────────────────────────
         needs_review = batch_result.get("needs_review", [])
         if needs_review:
             st.markdown("#### 2. Review Excel (for batch workflows)")
-            st.markdown("Share with library staff to fill in decisions offline, then re-import.")
+            st.markdown("Share with library staff to fill in decisions offline.")
             if HAS_OPENPYXL:
                 excel_bytes = build_review_excel(needs_review, orgs)
                 st.download_button(
@@ -669,31 +725,44 @@ with tab_output:
                     data=excel_bytes,
                     file_name=f"review_{ts}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    width='stretch',
+                    use_container_width=True,
                 )
             else:
                 st.warning("openpyxl not installed — Excel export unavailable.")
-
             st.markdown("---")
 
-        # ── Audit log
+        # ── Audit log ────────────────────────────────────────────────────────
         st.markdown("#### 3. Audit Log (JSON)")
-        new_persons_list = [
-            {"PersonID": v["PersonID"], "AuthorFullName": v["AuthorFullName"]}
-            for v in batch_result.get("new_persons", {}).values()
-        ]
+        new_persons_list = batch_result.get("new_persons", [])
+        if isinstance(new_persons_list, dict):
+            new_persons_list = list(new_persons_list.values())
+
+        n_exact   = len([r for r in batch_result.get("confirmed", [])
+                         if r.get("match_type") == "exact"])
+        n_initial = len([r for r in batch_result.get("needs_review", [])
+                         if r.get("match_type") == "initial_expansion"])
+        n_fuzzy   = len([r for r in batch_result.get("needs_review", [])
+                         if r.get("match_type") == "fuzzy"])
+        n_new     = len([r for r in batch_result.get("needs_review", [])
+                         if r.get("match_type") == "new"])
+
         audit_json = build_audit_json(
-            batch_result.get("confirmed", []),
-            output_rows,
-            rejected_rows,
-            new_persons_list,
+            summary={
+                "exact_matches":             n_exact,
+                "initial_expansion_matches": n_initial,
+                "fuzzy_matches":             n_fuzzy,
+                "new_persons":               n_new,
+                "finalized_records":         len(output_rows),
+                "rejected_records":          len(rejected_rows),
+            },
+            new_persons=new_persons_list,
         )
         st.download_button(
             label="⬇️  Download Audit Log (JSON)",
             data=audit_json.encode("utf-8"),
             file_name=f"audit_{ts}.json",
             mime="application/json",
-            width='stretch',
+            use_container_width=True,
         )
 
         with st.expander("Preview audit log", expanded=False):
@@ -701,17 +770,17 @@ with tab_output:
 
         st.markdown("---")
 
-        # ── Re-import filled Excel
+        # ── Re-import filled Excel ────────────────────────────────────────────
         st.markdown("#### 4. Re-import Filled Review Excel")
-        st.markdown("After library staff have filled in the review Excel, upload it here to merge.")
-
-        reimport_file = st.file_uploader("Upload filled review Excel", type=["xlsx"], key="reimport")
+        reimport_file = st.file_uploader("Upload filled review Excel",
+                                         type=["xlsx"], key="reimport")
         if reimport_file and st.button("🔄 Merge Review Decisions"):
-            wb = __import__("openpyxl").load_workbook(reimport_file)
-            ws = wb["Review Candidates"]
+            wb      = __import__("openpyxl").load_workbook(reimport_file)
+            ws      = wb["Author Review"]
             headers = [c.value for c in ws[1]]
 
-            def col(n): return headers.index(n)
+            def col(n):
+                return headers.index(n)
 
             extra_rows = []
             skip_count = 0
@@ -719,23 +788,30 @@ with tab_output:
                 approved = row[col("APPROVED")]
                 if approved and str(approved).strip().upper() == "YES":
                     extra_rows.append({
-                        "PersonID": str(row[col("PersonID")] or row[col("SuggestedPersonID")] or ""),
-                        "AuthorFullName": str(row[col("AuthorFullName")] or ""),
-                        "UT": str(row[col("UT")] or ""),
-                        "OrganizationID": str(row[col("OrganizationID")] or ""),
+                        "PersonID":       str(row[col("Detected PersonID")] or ""),
+                        "AuthorFullName": str(row[col("Existing Name")]      or ""),
+                        "UT":             str(row[col("UT")]                  or ""),
+                        "OrganizationID": str(row[col("OrganizationID")]      or ""),
                     })
                 else:
                     skip_count += 1
 
-            merged = output_rows + extra_rows
-            merged_csv = build_upload_csv(merged, source_file).encode("utf-8")
-            st.success(f"✅ Merged {len(merged)} rows ({len(extra_rows)} from review, {skip_count} skipped)")
+            merged     = output_rows + extra_rows
+            rows_merged = [
+                {**r, "OrgID": r.get("OrganizationID", ""), "SourceFile": source_file}
+                for r in merged
+            ]
+            merged_csv = build_upload_csv(rows_merged).encode("utf-8")
+            st.success(
+                f"✅ Merged {len(merged)} rows "
+                f"({len(extra_rows)} from review, {skip_count} skipped)"
+            )
             st.download_button(
                 "⬇️ Download Merged CSV",
                 data=merged_csv,
                 file_name=f"upload_ready_merged_{ts}.csv",
                 mime="text/csv",
-                width='stretch',
+                use_container_width=True,
             )
 
 
@@ -747,72 +823,71 @@ with tab_stats:
     if not st.session_state.processed:
         st.info("⬅️ Load and process data in Tab 1 to see statistics.")
     else:
-        import pandas as pd
-
-        muv_pairs = st.session_state.muv_pairs
+        muv_pairs    = st.session_state.muv_pairs
         batch_result = st.session_state.batch_result
         person_index = st.session_state.person_index
-        orgs = st.session_state.orgs
+        orgs         = st.session_state.orgs
 
-        confirmed = batch_result["confirmed"]
+        confirmed    = batch_result["confirmed"]
         needs_review = batch_result["needs_review"]
-        new_persons = batch_result["new_persons"]
+        new_persons  = batch_result["new_persons"]
+        if isinstance(new_persons, dict):
+            new_persons = list(new_persons.values())
 
         st.markdown('<div class="sec-head">Processing Summary</div>', unsafe_allow_html=True)
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("WoS Records", len(st.session_state.wos_records))
-        c2.metric("MUV Author-Doc Pairs", len(muv_pairs))
-        c3.metric("Existing Persons (index)", len(person_index))
-        c4.metric("Organizations", len(orgs))
+        c1.metric("WoS Records",           len(st.session_state.wos_records))
+        c2.metric("MUV Author-Doc Pairs",  len(muv_pairs))
+        c3.metric("Existing Persons",      len(person_index))
+        c4.metric("Organizations",         len(orgs))
 
         c5, c6, c7, c8 = st.columns(4)
-        c5.metric("Auto-Confirmed (exact)", len(confirmed))
-        c6.metric("New Persons Staged", len(new_persons))
-        c7.metric("Needs Review", len(needs_review))
-        c8.metric("Fuzzy Matches", len([r for r in needs_review if r["match_type"] == "fuzzy"]))
+        c5.metric("Auto-Confirmed (exact)",    len(confirmed))
+        c6.metric("Initial-Expansion Matches", len([r for r in needs_review if r["match_type"] == "initial_expansion"]))
+        c7.metric("Fuzzy Matches",             len([r for r in needs_review if r["match_type"] == "fuzzy"]))
+        c8.metric("New Persons Staged",        len(new_persons))
 
         st.markdown("---")
 
-        # ── MUV authors chart
         st.markdown('<div class="sec-head">MUV Authors in Input</div>', unsafe_allow_html=True)
-        author_doc_counts = defaultdict(int)
+        author_doc_counts: dict[str, int] = defaultdict(int)
         for p in muv_pairs:
             author_doc_counts[p["author_full"]] += 1
 
         if author_doc_counts:
-            df_authors = pd.DataFrame(
-                [{"Author": k, "Documents": v} for k, v in
-                 sorted(author_doc_counts.items(), key=lambda x: -x[1])]
-            )
+            df_authors = pd.DataFrame([
+                {"Author": k, "Documents": v}
+                for k, v in sorted(author_doc_counts.items(), key=lambda x: -x[1])
+            ])
             st.bar_chart(df_authors.set_index("Author")["Documents"])
 
         st.markdown("---")
 
-        # ── MUV affiliation distribution
-        st.markdown('<div class="sec-head">MUV Affiliation Strings Detected</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-head">MUV Affiliation Strings Detected</div>',
+                    unsafe_allow_html=True)
         affil_counts: dict[str, int] = defaultdict(int)
         for p in muv_pairs:
             for a in p["muv_affils"]:
                 affil_counts[a] += 1
 
         if affil_counts:
-            df_affils = pd.DataFrame(
-                [{"Affiliation": k, "Count": v} for k, v in
-                 sorted(affil_counts.items(), key=lambda x: -x[1])]
-            )
-            st.dataframe(df_affils, width='stretch')
+            df_affils = pd.DataFrame([
+                {"Affiliation": k, "Count": v}
+                for k, v in sorted(affil_counts.items(), key=lambda x: -x[1])
+            ])
+            st.dataframe(df_affils, use_container_width=True)
 
         st.markdown("---")
 
-        # ── All MUV pairs table
-        st.markdown('<div class="sec-head">All MUV Author-Document Pairs</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-head">All MUV Author-Document Pairs</div>',
+                    unsafe_allow_html=True)
         df_pairs = pd.DataFrame([{
-            "Author": p["author_full"],
-            "UT": p["ut"],
+            "Author":           p["author_full"],
+            "UT":               p["ut"],
             "MUV Affiliations": " | ".join(p["muv_affils"]),
         } for p in muv_pairs])
-        st.dataframe(df_pairs, width='stretch', height=300)
+        st.dataframe(df_pairs, use_container_width=True, height=300)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -835,7 +910,7 @@ Web of Science (WoS) exports and generates upload-ready entries for the
 | Step | Tab | What to do |
 |------|-----|-----------|
 | 1 | Load Files | Upload WoS export CSV, ResearcherAndDocument.csv, and OrganizationHierarchy.csv |
-| 2 | Review & Resolve | Verify fuzzy matches, assign organizations, approve/reject entries |
+| 2 | Review & Resolve | Verify matches, assign organizations, approve/reject entries |
 | 3 | Export Output | Download upload-ready CSV, review Excel, and audit log |
 
 ---
@@ -860,9 +935,15 @@ Web of Science (WoS) exports and generates upload-ready entries for the
 
 | Badge | Meaning | Action required |
 |-------|---------|-----------------|
-| ✓ EXISTING | Exact name match found | None — auto-confirmed |
+| ✓ EXACT | Exact name match found | None — auto-confirmed |
+| 🔤 INITIAL MATCH | WoS initials are compatible with a master full name (e.g. `Lazarov, N.` → `Lazarov, Nikola R.`) | Confirm or redirect to a different person |
 | ⚠ AMBIGUOUS | Name similar to existing person(s) | Choose correct person or create new |
-| 🆕 NEW PERSON | No match in existing data | Verify and assign organization |
+| 🆕 NEW PERSON | No match found | Verify and assign organization |
+
+### Sibling Groups
+When two WoS name variants refer to the same person (e.g. `Lazarov, N. R.` and
+`Lazarov, N.`), they are shown under a **🔗 Sibling group** banner so you can
+resolve them together.
 
 ---
 
@@ -880,30 +961,4 @@ Web of Science (WoS) exports and generates upload-ready entries for the
 2. Share Excel with curators to fill in `OrganizationID` and set `APPROVED = YES`
 3. Return to the app → Tab 3 → upload filled Excel → download merged CSV
 4. Import merged CSV into WoS My Organization
-
----
-
-### CLI Alternative
-
-```bash
-# Interactive mode
-python cli.py input100.csv --mode interactive
-
-# Batch mode (generates review Excel)
-python cli.py input100.csv --mode batch
-
-# Re-import filled review Excel
-python cli.py input100.csv --mode batch --reimport output/review_*.xlsx
-```
-
----
-
-### Output Files
-
-| File | Description |
-|------|-------------|
-| `upload_ready_*.csv` | Import this into WoS My Organization |
-| `review_*.xlsx` | Review sheet for human curation (batch mode) |
-| `audit_*.json` | Full audit trail of all decisions |
-| `staging.db` | SQLite staging database for incremental runs |
 """)
