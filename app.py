@@ -342,9 +342,11 @@ with tab_load:
             for item in batch_result["needs_review"]:
                 norm = item["norm"]
                 if norm not in decisions_by_norm:
+                    # Use org IDs from the matched master record as the pre-filled default
+                    default_org_ids = item.get("suggested_org_ids") or                                       ([item["OrganizationID"]] if item.get("OrganizationID") else [""])
                     decisions_by_norm[norm] = {
                         **item,
-                        "org_ids": [item.get("OrganizationID", "")],
+                        "org_ids":       default_org_ids,
                         "resolved_pid":  item.get("suggested_pid", ""),
                         "resolved_name": item.get("suggested_name",
                                                    item.get("AuthorFullName", "")),
@@ -551,12 +553,17 @@ with tab_review:
                                 dec["resolved_pid"]  = first.get("suggested_pid", "")
                                 dec["resolved_name"] = author
                                 dec["match_type"]    = "new"
+                                # Clear pre-filled orgs so user assigns manually
+                                dec["org_ids"] = [""]
                             else:
                                 idx = cand_labels.index(choice)
                                 _, chosen_person, _ = cands[idx]
                                 dec["resolved_pid"]  = chosen_person["PersonID"]
                                 dec["resolved_name"] = chosen_person["AuthorFullName"]
                                 dec["match_type"]    = "resolved"
+                                # Pre-fill org IDs from the chosen master record
+                                dec["org_ids"] = chosen_person.get("OrganizationIDs") or                                     ([chosen_person["OrganizationID"]]
+                                     if chosen_person.get("OrganizationID") else [""])
                         else:
                             dec["resolved_pid"] = st.text_input(
                                 "PersonID",
