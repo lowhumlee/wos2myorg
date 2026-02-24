@@ -137,16 +137,21 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
         }
     return list(persons.values()), max_pid
 
-def parse_org_hierarchy(csv_content: str) -> Dict[str, str]:
-    """Returns mapping of ID -> Name."""
-    orgs = {}
+def parse_org_hierarchy(csv_content: str) -> List[Dict]:
+    """
+    Returns list of organization dictionaries.
+    Expected by app.py: [{'OrganizationID': '...', 'OrganizationName': '...', 'ParentOrgaID': '...'}]
+    """
+    orgs = []
     f = io.StringIO(csv_content.strip())
     reader = csv.DictReader(f)
     for row in reader:
-        oid = row.get("OrganizationID")
-        oname = row.get("OrganizationName")
-        if oid and oname:
-            orgs[oid] = oname
+        if row.get("OrganizationID"):
+            orgs.append({
+                "OrganizationID": row.get("OrganizationID"),
+                "OrganizationName": row.get("OrganizationName", ""),
+                "ParentOrgaID": row.get("ParentOrgaID", "")
+            })
     return orgs
 
 def parse_wos_csv(csv_content: str) -> List[Dict]:
@@ -303,7 +308,7 @@ def group_new_authors(new_records: List[Dict]) -> List[Dict]:
 
 # ─── Batch Processing ─────────────────────────────────────────────────────────
 
-def batch_process(muv_pairs: List[Dict], person_index: List[Dict], orgs: Dict, cfg: dict, start_pid: int = 9000):
+def batch_process(muv_pairs: List[Dict], person_index: List[Dict], orgs: List[Dict] | Dict, cfg: dict, start_pid: int = 9000):
     """
     Processes extracted pairs against the person index.
     Returns a dict with 'confirmed', 'needs_review', and 'new_persons'.
@@ -469,7 +474,7 @@ def build_audit_json(summary: dict, new_persons: list) -> str:
     }
     return json.dumps(data, indent=2, ensure_ascii=False)
 
-def build_review_excel(results: List[Dict] | dict, org_hierarchy: Dict[str, str] = None):
+def build_review_excel(results: List[Dict] | dict, org_hierarchy: List[Dict] | Dict = None):
     import openpyxl
     from openpyxl.styles import Font, PatternFill
     
