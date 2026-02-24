@@ -132,9 +132,28 @@ def is_muv_affiliation(affil: str, patterns: list[str]) -> bool:
 # ─── WoS Record Processing ───────────────────────────────────────────────────
 
 def parse_wos_csv(content: str) -> list[dict]:
-    """Parse WoS export CSV from string content."""
+    """
+    Parse WoS export CSV from string content.
+    Strips whitespace from column names — WoS exports sometimes include
+    leading/trailing spaces in headers (e.g. ' UT' instead of 'UT').
+    """
     reader = csv.DictReader(io.StringIO(content))
-    return [dict(row) for row in reader]
+    rows = []
+    for row in reader:
+        # Skip None keys (caused by trailing delimiter in WoS exports)
+        # Strip whitespace from all string keys and values
+        clean = {}
+        for k, v in row.items():
+            if k is None:
+                continue
+            key = k.strip()
+            if not key:
+                continue
+            val = v.strip() if isinstance(v, str) else (v or "")
+            clean[key] = val
+        if clean:
+            rows.append(clean)
+    return rows
 
 
 def extract_muv_author_pairs(records: list[dict], cfg: dict) -> list[dict]:
