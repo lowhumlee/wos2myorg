@@ -321,9 +321,26 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict], orgs: Dict, c
         norm = normalize_name(pair["author_full"])
         author_groups[norm].append(pair)
 
+    # First pass: identify all matches and new persons
+    author_decisions = {}
     for norm, pairs in author_groups.items():
         author_full = pairs[0]["author_full"]
         match_type, candidates = match_person(author_full, person_index, threshold)
+        author_decisions[norm] = (match_type, candidates)
+
+    # Second pass: group new persons to find canonical names
+    new_author_records = []
+    for norm, (match_type, _) in author_decisions.items():
+        if match_type == "new":
+            new_author_records.append({"author_full": author_groups[norm][0]["author_full"]})
+    
+    grouped_new = group_new_authors(new_author_records)
+    canonical_lookup = {normalize_name(r["author_full"]): r["GroupedName"] for r in grouped_new}
+
+    # Final pass: build output rows
+    for norm, pairs in author_groups.items():
+        match_type, candidates = author_decisions[norm]
+        author_full = pairs[0]["author_full"]
         
         if match_type == "exact":
             p = candidates[0][1]
@@ -347,38 +364,19 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict], orgs: Dict, c
                     "AuthorFullName": author_full,
                 })
         else:
-            # Check if this "new" author can be grouped with another new author
-            # For batch process, we'll simplify: if we haven't seen a variant, it's a new canonical
-            found_canonical = None
-            sur, given = author_full.lower().split(',', 1) if ',' in author_full else (author_full.lower(), "")
-            sur = re.sub(r'[^a-z0-9\s]', '', strip_diacritics(sur)).strip()
-            initials = "".join([p[0] for p in given.split() if p])
+            resolved_name = canonical_lookup[norm]
+            # Use a normalized version of the canonical name to ensure same PID
+            canon_norm = normalize_name(resolved_name)
             
-            for staged_norm, staged_entry in new_persons_staged.items():
-                s_sur = staged_entry["surname"]
-                s_init = staged_entry["initials"]
-                if sur == s_sur and initials and s_init and initials[0] == s_init[0]:
-                    if initials.startswith(s_init) or s_init.startswith(initials):
-                        found_canonical = staged_entry
-                        # If current name is longer/more complete, update canonical
-                        if len(author_full) > len(staged_entry["AuthorFullName"]):
-                            staged_entry["AuthorFullName"] = author_full
-                            staged_entry["initials"] = initials
-                        break
-            
-            if found_canonical:
-                pid = found_canonical["PersonID"]
-                resolved_name = found_canonical["AuthorFullName"]
-            else:
+            if canon_norm not in new_persons_staged:
                 pid = str(pid_counter)
                 pid_counter += 1
-                resolved_name = author_full
-                new_persons_staged[norm] = {
+                new_persons_staged[canon_norm] = {
                     "PersonID": pid, 
-                    "AuthorFullName": author_full,
-                    "surname": sur,
-                    "initials": initials
+                    "AuthorFullName": resolved_name
                 }
+            
+            pid = new_persons_staged[canon_norm]["PersonID"]
             
             for pair in pairs:
                 needs_review.append({
