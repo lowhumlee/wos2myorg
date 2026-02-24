@@ -157,4 +157,4 @@ def batch_process(persons, wos_author_pairs, *args, **kwargs):
             base["GroupedVariants"] = "; ".join(variants)
             needs_review.append(base)
 
-    return matched, needs_review
+    return matched, needs_review, []
