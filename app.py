@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
+import pandas as pd
 
 # Make sure core.py is importable from same directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
