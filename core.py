@@ -20,6 +20,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+# ── Import the new initial-aware matcher ──────────────────────────────────────
+from initial_matching import InitialAwareMatcher, group_wos_authors
+
 logger = logging.getLogger("wos_muv.core")
 
 # ─── Default Configuration ────────────────────────────────────────────────────
@@ -39,6 +42,10 @@ DEFAULT_CONFIG: dict = {
     "new_person_id_start": 9000,
     "output_dir": "output",
     "db_path": "staging.db",
+    # New settings for initial-expansion matching
+    "initial_expansion_enabled": True,
+    "initial_expansion_auto_confirm": False,
+    "sibling_grouping_enabled": True,
 }
 
 
@@ -115,9 +122,8 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
         norm = normalize_name(full_name)
         
         # Analyze name parts for better matching
-        norm_last, norm_first = last_name.lower().strip(), first_name.lower().strip()
-        norm_last = re.sub(r'[^a-z0-9\s]', '', strip_diacritics(norm_last))
-        norm_first = re.sub(r'[^a-z0-9\s]', '', strip_diacritics(norm_first))
+        norm_last  = re.sub(r'[^a-z0-9\s]', '', strip_diacritics(last_name.lower().strip()))
+        norm_first = re.sub(r'[^a-z0-9\s]', '', strip_diacritics(first_name.lower().strip()))
         
         # Is it initials only? (e.g., "N. R.")
         is_init = all(len(p) == 1 for p in norm_first.split())
@@ -125,7 +131,7 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
 
         persons[pid_str] = {
             "PersonID": pid_str,
-            "AuthorFullName": full_name, # Standard field name for the app
+            "AuthorFullName": full_name,
             "FullName": full_name,
             "NormName": norm,
             "Surname": norm_last,
@@ -136,6 +142,20 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
             "OrganizationID": row.get("OrganizationID", ""),
         }
     return list(persons.values()), max_pid
+
+
+def build_researcher_dataframe(csv_content: str):
+    """
+    Builds a pandas DataFrame from ResearcherAndDocument.csv content.
+    Used by InitialAwareMatcher. Returns None if pandas is unavailable.
+    """
+    try:
+        import pandas as pd
+        f = io.StringIO(csv_content.strip())
+        return pd.read_csv(f)
+    except Exception:
+        return None
+
 
 def parse_org_hierarchy(csv_content: str) -> List[Dict]:
     """
@@ -184,70 +204,87 @@ def extract_muv_author_pairs(wos_records: List[Dict], cfg: dict) -> List[Dict]:
                 authors = [a.strip() for a in authors_str.split(';')]
                 for auth in authors:
                     extracted.append({
-                        "author_full": auth, # Required by app.py and cli.py
+                        "author_full": auth,
                         "AuthorName": auth,
                         "RawAffil": affil_str.strip(),
-                        "muv_affils": [affil_str.strip()], # Required by app.py
-                        "ut": ut, # Required by app.py and cli.py
+                        "muv_affils": [affil_str.strip()],
+                        "ut": ut,
                         "UT": ut,
                     })
     return extracted
 
 
-# ─── Matching Engine ─────────────────────────────────────────────────────────
+# ─── Matching Engine ──────────────────────────────────────────────────────────
 
-def match_person(author_name: str, person_index: List[Dict], threshold: float | dict) -> tuple[str, list]:
+def match_person(author_name: str, person_index: List[Dict], threshold: float | dict,
+                 initial_matcher: InitialAwareMatcher | None = None) -> tuple[str, list]:
     """
-    Improved author matching logic with initial containment and strict rules.
-    Returns (match_type, candidates_list).
+    3-tier author matching:
+      1. Exact string match   → returns ("exact", [...])
+      2. Initial expansion    → WoS "Lazarov, N." matches master "Lazarov, Nikolay R."
+                                returns ("fuzzy", [...]) with match_type tag "initial_expansion"
+      3. Fuzzy similarity     → SequenceMatcher above threshold
+                                returns ("fuzzy", [...])
+      4. No match             → returns ("new", [])
+
+    The InitialAwareMatcher (initial_matcher) handles tiers 1–3 when available.
+    Falls back to the original logic if it was not built (e.g. pandas missing).
     """
     if isinstance(threshold, dict):
         threshold = float(threshold.get("fuzzy_threshold", 0.85))
 
+    # ── Tier 1–3: use InitialAwareMatcher when available ─────────────────────
+    if initial_matcher is not None:
+        result = initial_matcher.match(author_name)
+
+        if result.kind == "exact":
+            # Convert to the existing tuple format: (score, person_dict, score)
+            c = result.candidates[0]
+            # Find the full person dict from person_index
+            p = next((p for p in person_index if p["PersonID"] == c.person_id), None)
+            if p:
+                return "exact", [(1.0, p, 1.0)]
+
+        if result.kind in ("initial_expansion", "fuzzy"):
+            candidates = []
+            for c in result.candidates:
+                p = next((p for p in person_index if p["PersonID"] == c.person_id), None)
+                if p:
+                    # Tag the person dict with match sub-type so the UI can label it
+                    tagged_p = {**p, "_match_subtype": c.match_type}
+                    candidates.append((c.score, tagged_p, c.score))
+            if candidates:
+                return "fuzzy", candidates
+
+        return "new", []
+
+    # ── Fallback: original logic (no pandas / InitialAwareMatcher not built) ──
     norm_auth = normalize_name(author_name)
     if ',' not in norm_auth:
-        # Fallback for names without comma
         for p in person_index:
             if p["NormName"] == norm_auth:
                 return "exact", [(1.0, p, 1.0)]
         return "new", []
 
     auth_sur, auth_given = norm_auth.split(',', 1)
-    auth_sur = auth_sur.strip()
+    auth_sur   = auth_sur.strip()
     auth_given = auth_given.strip()
-    
-    auth_initials = "".join([p[0] for p in auth_given.split() if p])
-    auth_is_init = all(len(p) == 1 for p in auth_given.split())
-    
-    candidates = []
 
+    auth_initials = "".join([p[0] for p in auth_given.split() if p])
+    auth_is_init  = all(len(p) == 1 for p in auth_given.split())
+
+    candidates = []
     for p in person_index:
-        # Exact string match is always top priority
         if p["NormName"] == norm_auth:
             return "exact", [(1.0, p, 1.0)]
-        
-        # Must have same surname
         if p["Surname"] != auth_sur:
             continue
-            
-        # First initial must match
         if not p["Initials"] or not auth_initials or p["Initials"][0] != auth_initials[0]:
             continue
-
-        # Rule 1: Initial-Only Matching Rule
-        # If WoS author is initials-only, only match against registry entries that are also initials-only.
-        if auth_is_init and not p["IsInitialsOnly"]:
-            continue
-            
-        # Rule 2: Initial Containment Logic
-        # Allow grouping if one set of initials is a prefix of the other (e.g., N vs NR)
         if auth_initials.startswith(p["Initials"]) or p["Initials"].startswith(auth_initials):
-            # We give a high score for initials match
             score = 0.95 if auth_initials == p["Initials"] else 0.90
             candidates.append((score, p, score))
             continue
-
-        # Fallback to fuzzy similarity for full names (if neither is initials-only)
         if not auth_is_init and not p["IsInitialsOnly"]:
             score = name_similarity(norm_auth, p["NormName"])
             if score >= threshold:
@@ -263,90 +300,120 @@ def match_person(author_name: str, person_index: List[Dict], threshold: float | 
 def group_new_authors(new_records: List[Dict]) -> List[Dict]:
     """
     Groups new authors that are variants of each other before insertion.
-    Rule 3: Prefer variant with most complete initials.
+    Uses the new group_wos_authors() for consistent sibling detection,
+    then falls back to the original logic for any edge cases.
     """
-    # Sort by name length descending so we find more complete names first
-    sorted_records = sorted(new_records, key=lambda x: len(x.get("author_full", "")), reverse=True)
-    
-    canonical_map = {} # norm_surname -> list of (canonical_name, initials)
-    
+    if not new_records:
+        return []
+
+    names = [r.get("author_full", "") for r in new_records]
+
+    # Use the new sibling grouper from initial_matching.py
+    sibling_groups = group_wos_authors(names)
+
+    # Build a lookup: name → canonical name for this group
+    # The canonical name is the longest (most complete) name in each group
+    name_to_canonical: dict[str, str] = {}
+    for group_members in sibling_groups.values():
+        # Pick the member with the most name parts as canonical
+        canonical = max(group_members, key=lambda n: len(normalize_name(n)))
+        for member in group_members:
+            name_to_canonical[member] = canonical
+
     processed = []
-    for rec in sorted_records:
+    for rec in new_records:
         name = rec.get("author_full", "")
-        norm = normalize_name(name)
-        if ',' not in norm:
-            rec["GroupedName"] = name
-            processed.append(rec)
-            continue
-            
-        sur, given = norm.split(',', 1)
-        sur = sur.strip()
-        given = given.strip()
-        initials = "".join([p[0] for p in given.split() if p])
-        
-        found_canonical = None
-        if sur in canonical_map:
-            for canon_name, canon_initials in canonical_map[sur]:
-                # If initials match or contain each other and first initial is same
-                if initials and canon_initials and initials[0] == canon_initials[0]:
-                    if initials.startswith(canon_initials) or canon_initials.startswith(initials):
-                        found_canonical = canon_name
-                        break
-        
-        if found_canonical:
-            rec["GroupedName"] = found_canonical
-        else:
-            rec["GroupedName"] = name
-            if sur not in canonical_map:
-                canonical_map[sur] = []
-            canonical_map[sur].append((name, initials))
-            
+        rec["GroupedName"] = name_to_canonical.get(name, name)
         processed.append(rec)
-        
+
     return processed
 
 
 # ─── Batch Processing ─────────────────────────────────────────────────────────
 
-def batch_process(muv_pairs: List[Dict], person_index: List[Dict], orgs: List[Dict] | Dict, cfg: dict, start_pid: int = 9000):
+def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
+                  orgs: List[Dict] | Dict, cfg: dict,
+                  start_pid: int = 9000,
+                  researcher_csv_content: str = ""):
     """
     Processes extracted pairs against the person index.
+
+    Parameters
+    ----------
+    researcher_csv_content : str
+        Raw CSV content of ResearcherAndDocument.csv.
+        Used to build the InitialAwareMatcher.
+        Pass an empty string to fall back to the original matching logic.
+
     Returns a dict with 'confirmed', 'needs_review', and 'new_persons'.
     """
-    confirmed = []
-    needs_review = []
-    new_persons_staged = {} # norm -> entry
-    
-    pid_counter = start_pid
-    threshold = float(cfg.get("fuzzy_threshold", 0.85))
+    confirmed      = []
+    needs_review   = []
+    new_persons_staged = {}
 
-    # Group by author first to apply grouping logic
-    author_groups = defaultdict(list)
+    pid_counter = start_pid
+    threshold   = float(cfg.get("fuzzy_threshold", 0.85))
+
+    # ── Build InitialAwareMatcher once for the whole batch ───────────────────
+    initial_matcher: InitialAwareMatcher | None = None
+    if cfg.get("initial_expansion_enabled", True) and researcher_csv_content:
+        researcher_df = build_researcher_dataframe(researcher_csv_content)
+        if researcher_df is not None:
+            initial_matcher = InitialAwareMatcher(researcher_df, fuzzy_threshold=threshold)
+            logger.info("InitialAwareMatcher built successfully.")
+        else:
+            logger.warning("pandas unavailable — falling back to original matching logic.")
+
+    # ── Group pairs by author name ────────────────────────────────────────────
+    author_groups: dict[str, list] = defaultdict(list)
     for pair in muv_pairs:
         norm = normalize_name(pair["author_full"])
         author_groups[norm].append(pair)
 
-    # First pass: identify all matches and new persons
-    author_decisions = {}
+    # ── First pass: match every unique author name ────────────────────────────
+    author_decisions: dict[str, tuple] = {}
     for norm, pairs in author_groups.items():
         author_full = pairs[0]["author_full"]
-        match_type, candidates = match_person(author_full, person_index, threshold)
+        match_type, candidates = match_person(
+            author_full, person_index, threshold, initial_matcher
+        )
         author_decisions[norm] = (match_type, candidates)
 
-    # Second pass: group new persons to find canonical names
-    new_author_records = []
-    for norm, (match_type, _) in author_decisions.items():
-        if match_type == "new":
-            new_author_records.append({"author_full": author_groups[norm][0]["author_full"]})
-    
-    grouped_new = group_new_authors(new_author_records)
-    canonical_lookup = {normalize_name(r["author_full"]): r["GroupedName"] for r in grouped_new}
+    # ── Second pass: group new persons (sibling clustering) ──────────────────
+    new_author_records = [
+        {"author_full": author_groups[norm][0]["author_full"]}
+        for norm, (mt, _) in author_decisions.items()
+        if mt == "new"
+    ]
+    grouped_new      = group_new_authors(new_author_records)
+    canonical_lookup = {
+        normalize_name(r["author_full"]): r["GroupedName"]
+        for r in grouped_new
+    }
 
-    # Final pass: build output rows
+    # ── Also group fuzzy/initial_expansion candidates as siblings ────────────
+    # This ensures "Lazarov, N." and "Lazarov, N. R." appear together in review
+    if cfg.get("sibling_grouping_enabled", True):
+        unresolved_names = [
+            author_groups[norm][0]["author_full"]
+            for norm, (mt, _) in author_decisions.items()
+            if mt in ("fuzzy", "new")
+        ]
+        sibling_map = group_wos_authors(unresolved_names)
+        # Invert: name → canonical group key (shortest key = most compact label)
+        name_to_sibling_group: dict[str, str] = {
+            name: gkey
+            for gkey, members in sibling_map.items()
+            for name in members
+        }
+    else:
+        name_to_sibling_group = {}
+
+    # ── Final pass: build output rows ─────────────────────────────────────────
     for norm, pairs in author_groups.items():
         match_type, candidates = author_decisions[norm]
         author_full = pairs[0]["author_full"]
-        
+
         if match_type == "exact":
             p = candidates[0][1]
             for pair in pairs:
@@ -357,32 +424,39 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict], orgs: List[Di
                     "AuthorFullName": p["AuthorFullName"],
                     "OrganizationID": p.get("OrganizationID", ""),
                 })
+
         elif match_type == "fuzzy":
+            # Determine the display label for the match sub-type
+            subtype = candidates[0][1].get("_match_subtype", "fuzzy") if candidates else "fuzzy"
+            sibling_group = name_to_sibling_group.get(author_full, author_full)
+
             for pair in pairs:
                 needs_review.append({
                     **pair,
-                    "match_type": "fuzzy",
+                    "match_type": subtype,          # "initial_expansion" or "fuzzy"
                     "norm": norm,
                     "candidates": candidates,
                     "suggested_pid": candidates[0][1]["PersonID"],
                     "suggested_name": candidates[0][1]["AuthorFullName"],
                     "AuthorFullName": author_full,
+                    "SiblingGroup": sibling_group,  # for grouping in review Excel
                 })
-        else:
-            resolved_name = canonical_lookup[norm]
-            # Use a normalized version of the canonical name to ensure same PID
-            canon_norm = normalize_name(resolved_name)
-            
+
+        else:  # new
+            resolved_name = canonical_lookup.get(norm, author_full)
+            canon_norm    = normalize_name(resolved_name)
+            sibling_group = name_to_sibling_group.get(author_full, author_full)
+
             if canon_norm not in new_persons_staged:
                 pid = str(pid_counter)
                 pid_counter += 1
                 new_persons_staged[canon_norm] = {
-                    "PersonID": pid, 
-                    "AuthorFullName": resolved_name
+                    "PersonID": pid,
+                    "AuthorFullName": resolved_name,
                 }
-            
+
             pid = new_persons_staged[canon_norm]["PersonID"]
-            
+
             for pair in pairs:
                 needs_review.append({
                     **pair,
@@ -392,12 +466,13 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict], orgs: List[Di
                     "AuthorFullName": resolved_name,
                     "suggested_pid": pid,
                     "suggested_name": resolved_name,
+                    "SiblingGroup": sibling_group,
                 })
 
     return {
         "confirmed": confirmed,
         "needs_review": needs_review,
-        "new_persons": list(new_persons_staged.values())
+        "new_persons": list(new_persons_staged.values()),
     }
 
 
@@ -432,7 +507,7 @@ class StagingDB:
             (pid, full_name, norm, int(is_new), datetime.now().isoformat(timespec="seconds"))
         )
         self.conn.commit()
-    
+
     def log_decision(self, pid: str, dtype: str, detail: str):
         self.conn.execute(
             "INSERT INTO decisions VALUES (?,?,?,?)",
@@ -446,6 +521,7 @@ class StagingDB:
             (author, ut, reason, datetime.now().isoformat(timespec="seconds"))
         )
         self.conn.commit()
+
 
 # ─── Export Formatters ────────────────────────────────────────────────────────
 
@@ -470,42 +546,71 @@ def build_audit_json(summary: dict, new_persons: list) -> str:
     data = {
         "generated_at": datetime.now().isoformat(),
         "summary": summary,
-        "new_persons": new_persons
+        "new_persons": new_persons,
     }
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 def build_review_excel(results: List[Dict] | dict, org_hierarchy: List[Dict] | Dict = None):
     import openpyxl
     from openpyxl.styles import Font, PatternFill
-    
+
     # Handle both list and dict inputs
     if isinstance(results, dict):
-        # Flatten the dict result into a list of all items
         all_items = results.get("confirmed", []) + results.get("needs_review", [])
     else:
         all_items = results
 
+    # Sort by SiblingGroup so variants appear together in the sheet
+    all_items = sorted(all_items, key=lambda r: r.get("SiblingGroup", r.get("author_full", "")))
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Author Review"
-    headers = ["Status", "WoS Author", "Detected PersonID", "Existing Name", "Match Score", "UT", "Affiliation", "OrganizationID", "APPROVED"]
+
+    headers = [
+        "Status", "WoS Author", "Detected PersonID", "Existing Name",
+        "Match Score", "UT", "Affiliation", "OrganizationID", "APPROVED",
+        "SiblingGroup",
+    ]
     ws.append(headers)
-    
+
+    # Colour fills: yellow = initial_expansion, blue = fuzzy, green = exact, grey = new
+    fills = {
+        "initial_expansion": PatternFill("solid", fgColor="FFF3CD"),
+        "fuzzy":             PatternFill("solid", fgColor="D1ECF1"),
+        "exact":             PatternFill("solid", fgColor="D4EDDA"),
+        "new":               PatternFill("solid", fgColor="E2E3E5"),
+    }
+
     for r in all_items:
-        # Check for candidates or direct match
-        m_pid = r.get("PersonID", "")
-        m_name = r.get("AuthorFullName", "")
-        score = r.get("Score", 1.0 if r.get("match_type") == "exact" else 0.0)
-        
-        ws.append([
-            r.get("match_type", "UNKNOWN").upper(), 
+        m_pid   = r.get("PersonID", "")
+        m_name  = r.get("AuthorFullName", "")
+        score   = r.get("Score", 1.0 if r.get("match_type") == "exact" else 0.0)
+        mtype   = r.get("match_type", "UNKNOWN")
+
+        row_data = [
+            mtype.upper(),
             r.get("author_full", r.get("AuthorName", "")),
-            m_pid, m_name,
-            score, r.get("UT", r.get("ut", "")), 
+            m_pid,
+            m_name,
+            score,
+            r.get("UT", r.get("ut", "")),
             "; ".join(r.get("muv_affils", [])) if isinstance(r.get("muv_affils"), list) else r.get("RawAffil", ""),
-            r.get("OrganizationID", ""), 
-            "YES" if r.get("match_type") == "exact" else "PENDING"
-        ])
+            r.get("OrganizationID", ""),
+            "YES" if mtype == "exact" else "PENDING",
+            r.get("SiblingGroup", ""),
+        ]
+        ws.append(row_data)
+
+        # Apply row colour based on match type
+        fill = fills.get(mtype, fills["new"])
+        for cell in ws[ws.max_row]:
+            cell.fill = fill
+
+    # Bold the header row
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
