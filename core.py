@@ -96,6 +96,11 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
     """
     Parses ResearcherAndDocument.csv.
     Returns: (list of unique persons, max PersonID found).
+
+    Each person dict contains:
+      "OrganizationID"  - first org ID seen (kept for backward compat)
+      "OrganizationIDs" - deduplicated list of ALL org IDs for this person
+                          (a person can appear on multiple rows with different orgs)
     """
     persons = {}
     max_pid = 0
@@ -105,7 +110,7 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
         pid_str = row.get("PersonID")
         if not pid_str:
             continue
-            
+
         try:
             pid_int = int(pid_str)
             if pid_int > max_pid:
@@ -113,33 +118,37 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
         except ValueError:
             pass
 
+        oid = row.get("OrganizationID", "").strip()
+
         if pid_str in persons:
+            # Person already recorded — just accumulate extra org IDs
+            if oid and oid not in persons[pid_str]["OrganizationIDs"]:
+                persons[pid_str]["OrganizationIDs"].append(oid)
             continue
-        
-        first_name = row.get('FirstName', '')
-        last_name = row.get('LastName', '')
-        full_name = f"{last_name}, {first_name}"
-        norm = normalize_name(full_name)
-        
-        # Analyze name parts for better matching
-        norm_last  = re.sub(r'[^a-z0-9\s]', '', strip_diacritics(last_name.lower().strip()))
-        norm_first = re.sub(r'[^a-z0-9\s]', '', strip_diacritics(first_name.lower().strip()))
-        
-        # Is it initials only? (e.g., "N. R.")
-        is_init = all(len(p) == 1 for p in norm_first.split())
+
+        first_name = row.get("FirstName", "")
+        last_name  = row.get("LastName",  "")
+        full_name  = f"{last_name}, {first_name}"
+        norm       = normalize_name(full_name)
+
+        norm_last  = re.sub(r"[^a-z0-9\s]", "", strip_diacritics(last_name.lower().strip()))
+        norm_first = re.sub(r"[^a-z0-9\s]", "", strip_diacritics(first_name.lower().strip()))
+
+        is_init  = all(len(p) == 1 for p in norm_first.split())
         initials = "".join([p[0] for p in norm_first.split() if p])
 
         persons[pid_str] = {
-            "PersonID": pid_str,
-            "AuthorFullName": full_name,
-            "FullName": full_name,
-            "NormName": norm,
-            "Surname": norm_last,
-            "GivenName": norm_first,
-            "Initials": initials,
-            "IsInitialsOnly": is_init,
-            "InitialsKey": get_initials_key(full_name),
-            "OrganizationID": row.get("OrganizationID", ""),
+            "PersonID":        pid_str,
+            "AuthorFullName":  full_name,
+            "FullName":        full_name,
+            "NormName":        norm,
+            "Surname":         norm_last,
+            "GivenName":       norm_first,
+            "Initials":        initials,
+            "IsInitialsOnly":  is_init,
+            "InitialsKey":     get_initials_key(full_name),
+            "OrganizationID":  oid,
+            "OrganizationIDs": [oid] if oid else [],
         }
     return list(persons.values()), max_pid
 
@@ -430,16 +439,23 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
             subtype = candidates[0][1].get("_match_subtype", "fuzzy") if candidates else "fuzzy"
             sibling_group = name_to_sibling_group.get(author_full, author_full)
 
+            # Carry the matched person's org IDs as the suggested default selection
+            top_person = candidates[0][1] if candidates else {}
+            suggested_org_ids = top_person.get("OrganizationIDs") or (
+                [top_person["OrganizationID"]] if top_person.get("OrganizationID") else []
+            )
+
             for pair in pairs:
                 needs_review.append({
                     **pair,
-                    "match_type": subtype,          # "initial_expansion" or "fuzzy"
+                    "match_type": subtype,
                     "norm": norm,
                     "candidates": candidates,
-                    "suggested_pid": candidates[0][1]["PersonID"],
-                    "suggested_name": candidates[0][1]["AuthorFullName"],
-                    "AuthorFullName": author_full,
-                    "SiblingGroup": sibling_group,  # for grouping in review Excel
+                    "suggested_pid":     top_person.get("PersonID", ""),
+                    "suggested_name":    top_person.get("AuthorFullName", author_full),
+                    "suggested_org_ids": suggested_org_ids,
+                    "AuthorFullName":    author_full,
+                    "SiblingGroup":      sibling_group,
                 })
 
         else:  # new
