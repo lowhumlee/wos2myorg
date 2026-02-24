@@ -66,7 +66,7 @@ def build_person_index(persons):
 # MAIN BATCH PROCESS
 # ==========================================================
 
-def batch_process(persons, wos_author_pairs):
+def batch_process(persons, wos_author_pairs, *args, **kwargs):
     """
     persons: list of researcher records from ResearcherAndDocument.csv
     wos_author_pairs: parsed WoS author records
