@@ -352,7 +352,7 @@ def batch_process(
                     "candidates": candidates,
                     "suggested_pid": top["PersonID"],
                     "suggested_name": top["AuthorFullName"],
-                    "OrganizationID": "",
+                    "OrganizationID": top.get("OrganizationID", ""),
                     "norm": norm,
                 })
 
