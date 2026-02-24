@@ -86,25 +86,40 @@ def name_similarity(a: str, b: str) -> float:
 
 # ─── Data Parsing ─────────────────────────────────────────────────────────────
 
-def build_person_index(csv_content: str) -> List[Dict]:
-    """Parses ResearcherAndDocument.csv and returns list of unique persons."""
+def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
+    """
+    Parses ResearcherAndDocument.csv.
+    Returns: (list of unique persons, max PersonID found).
+    """
     persons = {}
+    max_pid = 0
     f = io.StringIO(csv_content.strip())
     reader = csv.DictReader(f)
     for row in reader:
-        pid = row.get("PersonID")
-        if not pid or pid in persons: continue
+        pid_str = row.get("PersonID")
+        if not pid_str:
+            continue
+            
+        try:
+            pid_int = int(pid_str)
+            if pid_int > max_pid:
+                max_pid = pid_int
+        except ValueError:
+            pass
+
+        if pid_str in persons:
+            continue
         
         full_name = f"{row.get('LastName', '')}, {row.get('FirstName', '')}"
         norm = normalize_name(full_name)
         
-        persons[pid] = {
-            "PersonID": pid,
+        persons[pid_str] = {
+            "PersonID": pid_str,
             "FullName": full_name,
             "NormName": norm,
             "InitialsKey": get_initials_key(full_name)
         }
-    return list(persons.values())
+    return list(persons.values()), max_pid
 
 def parse_org_hierarchy(csv_content: str) -> Dict[str, str]:
     """Returns mapping of ID -> Name."""
@@ -227,7 +242,7 @@ def group_new_authors(new_records: List[Dict]) -> List[Dict]:
 # ─── Batch Processing ─────────────────────────────────────────────────────────
 
 def batch_process(wos_content: str, researcher_content: str, cfg: dict):
-    person_index = build_person_index(researcher_content)
+    person_index, _ = build_person_index(researcher_content)
     wos_records = parse_wos_csv(wos_content)
     muv_pairs = extract_muv_author_pairs(wos_records, cfg["muv_affiliation_patterns"])
     
