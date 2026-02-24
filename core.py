@@ -525,19 +525,19 @@ class StagingDB:
 
 # ─── Export Formatters ────────────────────────────────────────────────────────
 
-def build_upload_csv(affiliations: List[Dict]) -> str:
+def build_upload_csv(affiliations: List[Dict], source_file: str = "manual_entry") -> str:
     output = io.StringIO()
     fieldnames = ["PersonID", "AuthorFullName", "UT", "OrganizationID", "SourceFile", "Timestamp"]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     for aff in affiliations:
         writer.writerow({
-            "PersonID": aff.get("PersonID", ""),
+            "PersonID":       aff.get("PersonID", ""),
             "AuthorFullName": aff.get("AuthorFullName", ""),
-            "UT": aff.get("UT", ""),
-            "OrganizationID": aff.get("OrgID", ""),
-            "SourceFile": aff.get("SourceFile", "manual_entry"),
-            "Timestamp": datetime.now().isoformat()
+            "UT":             aff.get("UT", ""),
+            "OrganizationID": aff.get("OrgID", aff.get("OrganizationID", "")),
+            "SourceFile":     aff.get("SourceFile", source_file),
+            "Timestamp":      datetime.now().isoformat(),
         })
     return output.getvalue()
 
