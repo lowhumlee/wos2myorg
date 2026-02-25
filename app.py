@@ -699,12 +699,7 @@ with tab_output:
         st.markdown("#### 1. Upload-Ready CSV")
         st.markdown("Compatible with WoS My Organization bulk import format.")
 
-        # Add SourceFile to each row before building CSV
-        rows_with_source = [
-            {**r, "OrgID": r.get("OrganizationID", ""), "SourceFile": source_file}
-            for r in output_rows
-        ]
-        csv_bytes = build_upload_csv(rows_with_source).encode("utf-8")
+        csv_bytes = build_upload_csv(output_rows, source_file).encode("utf-8")
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         st.download_button(
@@ -799,16 +794,14 @@ with tab_output:
                         "AuthorFullName": str(row[col("Existing Name")]      or ""),
                         "UT":             str(row[col("UT")]                  or ""),
                         "OrganizationID": str(row[col("OrganizationID")]      or ""),
+                        # UT is also stored as DocumentID alias for build_upload_csv
+                        "DocumentID":     str(row[col("UT")]                  or ""),
                     })
                 else:
                     skip_count += 1
 
             merged     = output_rows + extra_rows
-            rows_merged = [
-                {**r, "OrgID": r.get("OrganizationID", ""), "SourceFile": source_file}
-                for r in merged
-            ]
-            merged_csv = build_upload_csv(rows_merged).encode("utf-8")
+            merged_csv = build_upload_csv(merged, source_file).encode("utf-8")
             st.success(
                 f"✅ Merged {len(merged)} rows "
                 f"({len(extra_rows)} from review, {skip_count} skipped)"
