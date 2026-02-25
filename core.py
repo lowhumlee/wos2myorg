@@ -541,19 +541,35 @@ class StagingDB:
 
 # ─── Export Formatters ────────────────────────────────────────────────────────
 
+def _split_full_name(full_name: str) -> tuple[str, str]:
+    """
+    Split "Lastname, Firstname" into (first_name, last_name).
+    Handles names with or without a comma.
+    """
+    if "," in full_name:
+        last, first = full_name.split(",", 1)
+        return first.strip(), last.strip()
+    # No comma — treat the whole string as last name, first name empty
+    return "", full_name.strip()
+
+
 def build_upload_csv(affiliations: List[Dict], source_file: str = "manual_entry") -> str:
+    """
+    Produces a CSV in the exact column order required by WoS My Organization:
+      PersonID | FirstName | LastName | OrganizationID | DocumentID
+    """
     output = io.StringIO()
-    fieldnames = ["PersonID", "AuthorFullName", "UT", "OrganizationID", "SourceFile", "Timestamp"]
+    fieldnames = ["PersonID", "FirstName", "LastName", "OrganizationID", "DocumentID"]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     for aff in affiliations:
+        first, last = _split_full_name(aff.get("AuthorFullName", ""))
         writer.writerow({
             "PersonID":       aff.get("PersonID", ""),
-            "AuthorFullName": aff.get("AuthorFullName", ""),
-            "UT":             aff.get("UT", ""),
+            "FirstName":      first,
+            "LastName":       last,
             "OrganizationID": aff.get("OrgID", aff.get("OrganizationID", "")),
-            "SourceFile":     aff.get("SourceFile", source_file),
-            "Timestamp":      datetime.now().isoformat(),
+            "DocumentID":     aff.get("UT", aff.get("DocumentID", "")),
         })
     return output.getvalue()
 
