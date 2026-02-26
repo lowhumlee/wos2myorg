@@ -25,11 +25,13 @@ from pathlib import Path
 from core import (
     DEFAULT_CONFIG, load_config,
     normalize_name, name_similarity,
-    build_person_index, parse_org_hierarchy, parse_wos_csv,
+    build_person_index, build_researcher_dataframe,
+    parse_org_hierarchy, parse_wos_csv,
     extract_muv_author_pairs, match_person, batch_process,
     build_upload_csv, build_audit_json, build_review_excel,
     StagingDB,
 )
+from initial_matching import InitialAwareMatcher
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -56,7 +58,6 @@ def cprint(msg: str, style: str = ""):
     if HAS_RICH:
         console.print(msg, style=style) if style else console.print(msg)
     else:
-        # Strip rich markup
         import re
         clean = re.sub(r"\[/?[^\]]+\]", "", msg)
         print(clean)
@@ -71,15 +72,23 @@ def banner():
 
 # ─── Interactive helpers ──────────────────────────────────────────────────────
 
-def prompt_fuzzy_resolve(author_full: str, candidates: list, ut: str) -> tuple[str, str]:
+def prompt_fuzzy_resolve(author_full: str, candidates: list, ut: str,
+                         match_subtype: str = "fuzzy") -> tuple[str, str]:
     """
-    Ask user to choose between fuzzy candidates or create new.
+    Ask user to choose between fuzzy/initial-expansion candidates or create new.
     Returns (person_id, full_name).
     """
-    cprint(f"\n[bold yellow]⚠ Ambiguous match for:[/bold yellow] [cyan]{author_full}[/cyan]  (UT: {ut})")
+    label = (
+        "🔤 Initial-expansion match" if match_subtype == "initial_expansion"
+        else "⚠ Ambiguous match"
+    )
+    cprint(f"\n[bold yellow]{label} for:[/bold yellow] [cyan]{author_full}[/cyan]  (UT: {ut})")
     cprint("  Possible matches in existing dataset:")
     for i, (_, person, score) in enumerate(candidates, 1):
-        cprint(f"    {i}. {person['AuthorFullName']}  "
+        subtype_tag = (
+            " [initial match]" if person.get("_match_subtype") == "initial_expansion" else ""
+        )
+        cprint(f"    {i}. {person['AuthorFullName']}{subtype_tag}  "
                f"(PersonID {person['PersonID']}, score: {score:.2f})")
     cprint(f"    {len(candidates)+1}. ➕  Create as NEW PERSON")
 
@@ -96,16 +105,32 @@ def prompt_fuzzy_resolve(author_full: str, candidates: list, ut: str) -> tuple[s
             cprint("  Invalid input, please try again.")
 
 
-def prompt_org_selection(author_full: str, orgs: list[dict], multi: bool = True) -> list[str]:
+def prompt_org_selection(author_full: str, orgs: list[dict],
+                         suggested_org_ids: list[str] = None,
+                         multi: bool = True) -> list[str]:
     """
     Ask user to assign one or more OrganizationIDs.
+    Pre-selects suggested_org_ids (from master record) if provided.
     Returns list of org ID strings.
     """
+    # If we have suggested orgs from the master record, offer to use them directly
+    if suggested_org_ids:
+        org_names = []
+        for oid in suggested_org_ids:
+            match = next((o for o in orgs if o["OrganizationID"] == oid), None)
+            name = match["OrganizationName"] if match else oid
+            org_names.append(f"[{oid}] {name}")
+        cprint(f"\n  Suggested organization(s) from master record: "
+               f"[green]{', '.join(org_names)}[/green]")
+        ans = input("  Use suggested org(s)? [Y/n]: ").strip().lower()
+        if ans != "n":
+            return suggested_org_ids
+
     cprint(f"\n[bold cyan]🏛  Select organization for:[/bold cyan] [green]{author_full}[/green]")
 
-    roots = [o for o in orgs if not o["ParentOrgaID"]]
+    roots    = [o for o in orgs if not o["ParentOrgaID"]]
     children = [o for o in orgs if o["ParentOrgaID"]]
-    display = roots + children
+    display  = roots + children
 
     for i, org in enumerate(display, 1):
         indent = "    " if org["ParentOrgaID"] else ""
@@ -128,7 +153,7 @@ def prompt_org_selection(author_full: str, orgs: list[dict], multi: bool = True)
                 elif 1 <= idx <= n:
                     return display[idx - 1]["OrganizationID"]
                 elif idx == n + 1:
-                    kw = input("  Search keyword: ").strip().lower()
+                    kw   = input("  Search keyword: ").strip().lower()
                     hits = [o for o in orgs if kw in o["OrganizationName"].lower()]
                     if not hits:
                         cprint("  No matches found.")
@@ -172,23 +197,30 @@ def run_interactive(
     out_dir: str,
 ) -> dict:
     os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    db = StagingDB(os.path.join(out_dir, cfg.get("db_path", "staging.db")))
+    ts        = datetime.now().strftime("%Y%m%d_%H%M%S")
+    db        = StagingDB(os.path.join(out_dir, cfg.get("db_path", "staging.db")))
 
     person_index, max_pid = build_person_index(researcher_content)
-    orgs = parse_org_hierarchy(org_content)
-    records = parse_wos_csv(wos_content)
+    orgs      = parse_org_hierarchy(org_content)
+    records   = parse_wos_csv(wos_content)
     muv_pairs = extract_muv_author_pairs(records, cfg)
 
-    start_pid = max(int(cfg.get("new_person_id_start", 9000)), max_pid + 1)
-    pid_counter = start_pid
-    multi_org = cfg.get("allow_multi_org", True)
-    threshold = float(cfg.get("fuzzy_threshold", 0.85))
+    # Build InitialAwareMatcher so interactive mode benefits from initial-expansion
+    researcher_df  = build_researcher_dataframe(researcher_content)
+    threshold      = float(cfg.get("fuzzy_threshold", 0.85))
+    initial_matcher = (
+        InitialAwareMatcher(researcher_df, fuzzy_threshold=threshold)
+        if researcher_df is not None else None
+    )
 
-    output_rows: list[dict] = []
-    rejected: list[dict] = []
+    start_pid   = max(int(cfg.get("new_person_id_start", 9000)), max_pid + 1)
+    pid_counter = start_pid
+    multi_org   = cfg.get("allow_multi_org", True)
+
+    output_rows: list[dict]        = []
+    rejected: list[dict]           = []
     new_persons_created: dict[str, dict] = {}
-    seen_pairs: set[tuple] = set()
+    seen_pairs: set[tuple]         = set()
 
     author_groups: dict[str, list[dict]] = defaultdict(list)
     for pair in muv_pairs:
@@ -203,57 +235,85 @@ def run_interactive(
         author_full = pairs[0]["author_full"]
         cprint(f"\n[dim]─── Author {auth_idx}/{total} ───[/dim]")
 
-        match_type, candidates = match_person(author_full, person_index, {"fuzzy_threshold": threshold})
+        match_type, candidates = match_person(
+            author_full, person_index,
+            {"fuzzy_threshold": threshold},
+            initial_matcher,
+        )
+        match_subtype = (
+            candidates[0][1].get("_match_subtype", "fuzzy")
+            if candidates else "fuzzy"
+        )
 
         # Resolve identity
         if match_type == "exact":
-            person = candidates[0][1]
-            pid = person["PersonID"]
+            person        = candidates[0][1]
+            pid           = person["PersonID"]
             resolved_name = person["AuthorFullName"]
+            suggested_org_ids = person.get("OrganizationIDs") or (
+                [person["OrganizationID"]] if person.get("OrganizationID") else []
+            )
             cprint(f"  [green]✓ Exact match:[/green] {resolved_name} (PersonID {pid})")
             db.log_decision(pid, "exact_match", author_full)
 
         elif match_type == "fuzzy":
-            pid_raw, resolved_name = prompt_fuzzy_resolve(author_full, candidates, pairs[0]["ut"])
+            pid_raw, resolved_name = prompt_fuzzy_resolve(
+                author_full, candidates, pairs[0]["ut"], match_subtype
+            )
             if pid_raw == "NEW":
                 match_type = "new"
                 pid = None
+                suggested_org_ids = []
             else:
                 pid = pid_raw
-                db.log_decision(pid, "fuzzy_resolved", f"Chose {pid} for: {author_full}")
+                # Use org IDs from the chosen candidate
+                chosen = next(
+                    (c[1] for c in candidates if c[1]["PersonID"] == pid), {}
+                )
+                suggested_org_ids = chosen.get("OrganizationIDs") or (
+                    [chosen["OrganizationID"]] if chosen.get("OrganizationID") else []
+                )
+                db.log_decision(pid, "fuzzy_resolved",
+                                f"Chose {pid} for: {author_full}")
 
         if match_type == "new":
             if norm in new_persons_created:
-                entry = new_persons_created[norm]
-                pid = entry["PersonID"]
+                entry         = new_persons_created[norm]
+                pid           = entry["PersonID"]
                 resolved_name = entry["AuthorFullName"]
             else:
-                pid = str(pid_counter)
-                pid_counter += 1
+                pid           = str(pid_counter)
+                pid_counter  += 1
                 resolved_name = author_full
-                new_persons_created[norm] = {"PersonID": pid, "AuthorFullName": author_full}
+                new_persons_created[norm] = {
+                    "PersonID": pid, "AuthorFullName": author_full
+                }
                 db.upsert_person(pid, author_full, norm, is_new=True)
-                cprint(f"  [bold green]➕ NEW PERSON:[/bold green] {author_full} → PersonID {pid}")
+                cprint(f"  [bold green]➕ NEW PERSON:[/bold green] "
+                       f"{author_full} → PersonID {pid}")
                 db.log_decision(pid, "new_person", author_full)
+            suggested_org_ids = []
 
-        # Org assignment for each UT
-        org_assigned_for_author: list[str] | None = None  # cache per author/run
+        # Org assignment
+        org_assigned_for_author: list[str] | None = None
 
         for pair in pairs:
-            ut = pair["ut"]
+            ut         = pair["ut"]
             muv_affils = pair["muv_affils"]
             cprint(f"  [dim]UT: {ut} | MUV affils: {'; '.join(muv_affils[:2])}[/dim]")
 
-            # Determine org IDs
-            if match_type == "exact" and candidates:
-                org_ids = [candidates[0][1].get("OrganizationID", "")]
-                org_ids = [o for o in org_ids if o]
-                if not org_ids:
-                    org_ids = prompt_org_selection(author_full, orgs, multi_org)
+            if match_type == "exact":
+                org_ids = suggested_org_ids or prompt_org_selection(
+                    author_full, orgs, suggested_org_ids=[], multi=multi_org
+                )
             else:
                 if org_assigned_for_author is None:
                     cprint(f"  Affiliations detected: {'; '.join(muv_affils)}")
-                    org_assigned_for_author = prompt_org_selection(author_full, orgs, multi_org)
+                    org_assigned_for_author = prompt_org_selection(
+                        author_full, orgs,
+                        suggested_org_ids=suggested_org_ids,
+                        multi=multi_org,
+                    )
                 org_ids = org_assigned_for_author
 
             if not org_ids:
@@ -263,33 +323,52 @@ def run_interactive(
                 key = (pid, ut, org_id)
                 if key in seen_pairs:
                     db.log_rejected(author_full, ut, f"Duplicate pair {key}")
-                    rejected.append({"AuthorFullName": author_full, "UT": ut, "Reason": "Duplicate"})
+                    rejected.append({
+                        "AuthorFullName": author_full,
+                        "UT": ut,
+                        "Reason": "Duplicate",
+                    })
                     continue
                 seen_pairs.add(key)
                 output_rows.append({
-                    "PersonID": pid,
+                    "PersonID":       pid,
                     "AuthorFullName": resolved_name,
-                    "UT": ut,
+                    "UT":             ut,
                     "OrganizationID": org_id,
-                    "match_type": match_type,
+                    "match_type":     match_type,
                 })
-                db.add_affiliation(pid, ut, org_id, " | ".join(muv_affils), source_file)
                 db.log_decision(pid, "org_assigned", f"UT={ut} OrgID={org_id}")
 
-    # ── Write outputs
+    # ── Write outputs ─────────────────────────────────────────────────────────
     csv_path = os.path.join(out_dir, f"upload_ready_{ts}.csv")
-    csv_content = build_upload_csv(output_rows, source_file)
-    Path(csv_path).write_text(csv_content, encoding="utf-8")
-
-    new_persons_list = [{"PersonID": v["PersonID"], "AuthorFullName": v["AuthorFullName"]}
-                        for v in new_persons_created.values()]
-    audit_path = os.path.join(out_dir, f"audit_{ts}.json")
-    Path(audit_path).write_text(
-        build_audit_json(output_rows, output_rows, rejected, new_persons_list),
-        encoding="utf-8"
+    Path(csv_path).write_text(
+        build_upload_csv(output_rows, source_file), encoding="utf-8"
     )
 
-    db.close()
+    new_persons_list = [
+        {"PersonID": v["PersonID"], "AuthorFullName": v["AuthorFullName"]}
+        for v in new_persons_created.values()
+    ]
+    n_exact   = sum(1 for r in output_rows if r.get("match_type") == "exact")
+    n_fuzzy   = sum(1 for r in output_rows if r.get("match_type") in ("fuzzy", "resolved"))
+    n_initial = sum(1 for r in output_rows if r.get("match_type") == "initial_expansion")
+    n_new     = len(new_persons_created)
+
+    audit_path = os.path.join(out_dir, f"audit_{ts}.json")
+    Path(audit_path).write_text(
+        build_audit_json(
+            summary={
+                "exact_matches":             n_exact,
+                "initial_expansion_matches": n_initial,
+                "fuzzy_matches":             n_fuzzy,
+                "new_persons":               n_new,
+                "finalized_records":         len(output_rows),
+                "rejected_records":          len(rejected),
+            },
+            new_persons=new_persons_list,
+        ),
+        encoding="utf-8",
+    )
 
     cprint(f"\n[bold green]{'═'*50}[/bold green]")
     cprint("[bold green]✅ Processing complete![/bold green]")
@@ -302,12 +381,12 @@ def run_interactive(
     cprint(f"  Audit log            : {audit_path}")
 
     return {
-        "records": len(records),
-        "muv_pairs": len(muv_pairs),
-        "new_persons": len(new_persons_created),
-        "output_rows": len(output_rows),
-        "csv_path": csv_path,
-        "audit_path": audit_path,
+        "records":      len(records),
+        "muv_pairs":    len(muv_pairs),
+        "new_persons":  len(new_persons_created),
+        "output_rows":  len(output_rows),
+        "csv_path":     csv_path,
+        "audit_path":   audit_path,
     }
 
 
@@ -326,101 +405,140 @@ def run_batch(
     db = StagingDB(os.path.join(out_dir, cfg.get("db_path", "staging.db")))
 
     person_index, max_pid = build_person_index(researcher_content)
-    orgs = parse_org_hierarchy(org_content)
-    records = parse_wos_csv(wos_content)
+    orgs      = parse_org_hierarchy(org_content)
+    records   = parse_wos_csv(wos_content)
     muv_pairs = extract_muv_author_pairs(records, cfg)
 
     start_pid = max(int(cfg.get("new_person_id_start", 9000)), max_pid + 1)
 
-    result = batch_process(muv_pairs, person_index, orgs, cfg, start_pid)
-    confirmed = result["confirmed"]
+    # ── KEY FIX: pass researcher_content so InitialAwareMatcher gets built ───
+    result = batch_process(
+        muv_pairs, person_index, orgs, cfg, start_pid,
+        researcher_csv_content=researcher_content,
+    )
+    confirmed    = result["confirmed"]
     needs_review = result["needs_review"]
-    new_persons = result["new_persons"]
+    new_persons  = result["new_persons"]
 
-    # Write confirmed rows to CSV
+    # Write confirmed rows to upload-ready CSV
     csv_path = os.path.join(out_dir, f"upload_ready_{ts}.csv")
-    Path(csv_path).write_text(build_upload_csv(confirmed, source_file), encoding="utf-8")
+    Path(csv_path).write_text(
+        build_upload_csv(confirmed, source_file), encoding="utf-8"
+    )
 
     # Write review Excel
+    excel_path = None
     try:
         excel_bytes = build_review_excel(needs_review, orgs)
-        excel_path = os.path.join(out_dir, f"review_{ts}.xlsx")
+        excel_path  = os.path.join(out_dir, f"review_{ts}.xlsx")
         Path(excel_path).write_bytes(excel_bytes)
         cprint(f"  Review Excel         : {excel_path}")
     except ImportError:
-        excel_path = None
         cprint("  [yellow]openpyxl not available — review Excel skipped.[/yellow]")
 
-    # Audit
-    new_list = [{"PersonID": v["PersonID"], "AuthorFullName": v["AuthorFullName"]}
-                for v in new_persons.values()]
+    # Audit log
+    if isinstance(new_persons, dict):
+        new_persons = list(new_persons.values())
+    new_list = [
+        {"PersonID": v["PersonID"], "AuthorFullName": v["AuthorFullName"]}
+        for v in new_persons
+    ]
+
+    n_exact   = len(confirmed)
+    n_initial = sum(1 for r in needs_review if r.get("match_type") == "initial_expansion")
+    n_fuzzy   = sum(1 for r in needs_review if r.get("match_type") == "fuzzy")
+    n_new     = sum(1 for r in needs_review if r.get("match_type") == "new")
+
     audit_path = os.path.join(out_dir, f"audit_{ts}.json")
     Path(audit_path).write_text(
-        build_audit_json(confirmed, confirmed, [], new_list),
-        encoding="utf-8"
+        build_audit_json(
+            summary={
+                "exact_matches":             n_exact,
+                "initial_expansion_matches": n_initial,
+                "fuzzy_matches":             n_fuzzy,
+                "new_persons":               n_new,
+                "finalized_records":         n_exact,
+                "rejected_records":          0,
+            },
+            new_persons=new_list,
+        ),
+        encoding="utf-8",
     )
-
-    db.close()
 
     cprint(f"\n[bold green]✅ Batch processing complete![/bold green]")
     cprint(f"  Records in input     : {len(records)}")
     cprint(f"  MUV author-doc pairs : {len(muv_pairs)}")
     cprint(f"  Auto-confirmed rows  : {len(confirmed)}")
-    cprint(f"  Needs human review   : {len(needs_review)}")
-    cprint(f"  New persons staged   : {len(new_persons)}")
+    cprint(f"  Initial-exp matches  : {n_initial}")
+    cprint(f"  Fuzzy matches        : {n_fuzzy}")
+    cprint(f"  New persons staged   : {n_new}")
     cprint(f"  Upload CSV           : {csv_path}")
     cprint(f"  Audit log            : {audit_path}")
 
     return {
-        "records": len(records),
-        "muv_pairs": len(muv_pairs),
-        "confirmed": len(confirmed),
+        "records":      len(records),
+        "muv_pairs":    len(muv_pairs),
+        "confirmed":    len(confirmed),
         "needs_review": len(needs_review),
-        "new_persons": len(new_persons),
-        "csv_path": csv_path,
-        "excel_path": excel_path,
-        "audit_path": audit_path,
+        "new_persons":  n_new,
+        "csv_path":     csv_path,
+        "excel_path":   excel_path,
+        "audit_path":   audit_path,
     }
 
 
-def reimport_decisions(excel_path: str, confirmed_csv: str, source_file: str, out_dir: str) -> dict:
+def reimport_decisions(
+    excel_path: str,
+    confirmed_csv: str,
+    source_file: str,
+    out_dir: str,
+) -> dict:
     """Re-import user-validated review Excel and merge with auto-confirmed CSV."""
     import openpyxl
-    wb = openpyxl.load_workbook(excel_path)
-    ws = wb["Review Candidates"]
+    wb      = openpyxl.load_workbook(excel_path)
+    # Sheet is named "Author Review" (set by build_review_excel in core.py)
+    ws      = wb["Author Review"]
     headers = [cell.value for cell in ws[1]]
 
     def col(name):
         return headers.index(name)
 
     extra_rows = []
-    skipped = 0
+    skipped    = 0
     for row in ws.iter_rows(min_row=2, values_only=True):
         if row[col("APPROVED")] and str(row[col("APPROVED")]).strip().upper() == "YES":
             extra_rows.append({
-                "PersonID": str(row[col("PersonID")] or row[col("SuggestedPersonID")] or ""),
-                "AuthorFullName": str(row[col("AuthorFullName")] or ""),
-                "UT": str(row[col("UT")] or ""),
-                "OrganizationID": str(row[col("OrganizationID")] or ""),
+                "PersonID":       str(row[col("Detected PersonID")] or ""),
+                "AuthorFullName": str(row[col("Existing Name")]      or ""),
+                "UT":             str(row[col("UT")]                  or ""),
+                "OrganizationID": str(row[col("OrganizationID")]      or ""),
             })
         else:
             skipped += 1
 
-    # Read existing confirmed CSV
-    existing = Path(confirmed_csv).read_text(encoding="utf-8") if os.path.exists(confirmed_csv) else ""
-    merged_rows = []
-
-    # Parse existing
-    if existing:
-        reader = csv.DictReader(io.StringIO(existing))
+    # Read existing confirmed CSV and parse it back
+    merged_rows: list[dict] = []
+    if confirmed_csv and os.path.exists(confirmed_csv):
+        reader = csv.DictReader(
+            io.StringIO(Path(confirmed_csv).read_text(encoding="utf-8"))
+        )
         for r in reader:
-            merged_rows.append(r)
+            # The confirmed CSV is already in MyOrg format (FirstName/LastName/DocumentID)
+            # Reconstruct AuthorFullName so build_upload_csv can re-split it
+            merged_rows.append({
+                "PersonID":       r.get("PersonID", ""),
+                "AuthorFullName": f"{r.get('LastName','')}, {r.get('FirstName','')}".strip(", "),
+                "UT":             r.get("DocumentID", ""),
+                "OrganizationID": r.get("OrganizationID", ""),
+            })
 
     merged_rows.extend(extra_rows)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    merged_path = os.path.join(out_dir, f"upload_ready_merged_{ts}.csv")
-    Path(merged_path).write_text(build_upload_csv(merged_rows, source_file), encoding="utf-8")
+    ts           = datetime.now().strftime("%Y%m%d_%H%M%S")
+    merged_path  = os.path.join(out_dir, f"upload_ready_merged_{ts}.csv")
+    Path(merged_path).write_text(
+        build_upload_csv(merged_rows, source_file), encoding="utf-8"
+    )
 
     cprint(f"  Merged rows          : {len(merged_rows)}")
     cprint(f"  Approved from review : {len(extra_rows)}")
@@ -453,18 +571,19 @@ Examples:
       --config config.json --out output/
         """
     )
-    parser.add_argument("input", help="WoS export CSV file")
-    parser.add_argument("--researcher", default="ResearcherAndDocument.csv",
+    parser.add_argument("input",         help="WoS export CSV file")
+    parser.add_argument("--researcher",  default="ResearcherAndDocument.csv",
                         help="Existing ResearcherAndDocument.csv")
-    parser.add_argument("--orgs", default="OrganizationHierarchy.csv",
+    parser.add_argument("--orgs",        default="OrganizationHierarchy.csv",
                         help="OrganizationHierarchy.csv")
-    parser.add_argument("--config", default="config.json",
+    parser.add_argument("--config",      default="config.json",
                         help="JSON config file")
-    parser.add_argument("--mode", choices=["interactive", "batch"], default="interactive",
+    parser.add_argument("--mode",        choices=["interactive", "batch"],
+                        default="interactive",
                         help="Processing mode (default: interactive)")
-    parser.add_argument("--out", default="output",
+    parser.add_argument("--out",         default="output",
                         help="Output directory (default: output/)")
-    parser.add_argument("--reimport", default=None,
+    parser.add_argument("--reimport",    default=None,
                         help="Path to filled review Excel to re-import (batch mode only)")
     parser.add_argument("--confirmed-csv", default=None,
                         help="Auto-confirmed CSV from previous batch run (for reimport merge)")
@@ -480,22 +599,31 @@ Examples:
             sys.exit(1)
         return Path(path).read_text(encoding="utf-8-sig")
 
-    wos_content = read_file(args.input)
+    wos_content        = read_file(args.input)
     researcher_content = read_file(args.researcher)
-    org_content = read_file(args.orgs)
-    source_file = os.path.basename(args.input)
+    org_content        = read_file(args.orgs)
+    source_file        = os.path.basename(args.input)
 
     if args.reimport:
         if not args.confirmed_csv:
             cprint("[yellow]Note: --confirmed-csv not provided; reimport-only mode.[/yellow]")
         cprint(f"\n[bold]Re-importing review decisions from:[/bold] {args.reimport}")
-        reimport_decisions(args.reimport, args.confirmed_csv or "", source_file, args.out)
+        reimport_decisions(
+            args.reimport, args.confirmed_csv or "",
+            source_file, args.out,
+        )
         return
 
     if args.mode == "interactive":
-        run_interactive(wos_content, researcher_content, org_content, cfg, source_file, args.out)
+        run_interactive(
+            wos_content, researcher_content, org_content,
+            cfg, source_file, args.out,
+        )
     else:
-        run_batch(wos_content, researcher_content, org_content, cfg, source_file, args.out)
+        run_batch(
+            wos_content, researcher_content, org_content,
+            cfg, source_file, args.out,
+        )
 
 
 if __name__ == "__main__":
