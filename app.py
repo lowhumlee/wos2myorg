@@ -248,6 +248,42 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# ─── Live person search helper ───────────────────────────────────────────────
+
+def search_person_index(query: str, person_index: list, max_results: int = 6) -> list:
+    """
+    Search the person index for names matching `query`.
+    Returns a ranked list of (score, person_dict) tuples.
+    Handles both surname-first ("Chaushev, Borislav") and
+    given-first ("Borislav Chaushev") queries.
+    """
+    from core import normalize_name, name_similarity
+    if not query or len(query) < 2:
+        return []
+
+    q = normalize_name(query)
+    # Also try reversing "Firstname Lastname" → "Lastname, Firstname"
+    q_parts = q.split()
+    q_reversed = f"{q_parts[-1]} {' '.join(q_parts[:-1])}" if len(q_parts) > 1 else q
+
+    results = []
+    for p in person_index:
+        name = p["NormName"]
+        # Score against both orderings
+        score = max(
+            name_similarity(q, name),
+            name_similarity(q_reversed, name),
+        )
+        # Boost if the query is a substring of the name or vice versa
+        if q in name or any(part in name for part in q.split() if len(part) > 2):
+            score = max(score, 0.5)
+        if score >= 0.3:
+            results.append((score, p))
+
+    results.sort(key=lambda x: -x[0])
+    return results[:max_results]
+
+
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
 tab_load, tab_review, tab_output, tab_stats, tab_help = st.tabs([
@@ -638,16 +674,51 @@ with tab_review:
                                 dec["org_ids"] = chosen_person.get("OrganizationIDs") or                                     ([chosen_person["OrganizationID"]]
                                      if chosen_person.get("OrganizationID") else [""])
                         else:
+                            # ── Live search as you type ───────────────────────
+                            typed_name = st.text_input(
+                                "Correct author name (type to search existing)",
+                                value=dec.get("resolved_name", author),
+                                key=f"name_{norm}",
+                                help="Start typing to see matches from the master researcher list",
+                            )
+                            dec["resolved_name"] = typed_name
+
+                            # Search person index with whatever is typed
+                            live_hits = search_person_index(
+                                typed_name, list(st.session_state.person_index)
+                            )
+
+                            if live_hits:
+                                st.caption("🔍 Possible matches — click one to select:")
+                                for hit_score, hit_person in live_hits:
+                                    hit_label = (
+                                        f"{hit_person['AuthorFullName']} "
+                                        f"· ID {hit_person['PersonID']} "
+                                        f"· {int(hit_score*100)}% match"
+                                    )
+                                    if st.button(
+                                        hit_label,
+                                        key=f"hit_{norm}_{hit_person['PersonID']}",
+                                        use_container_width=True,
+                                    ):
+                                        dec["resolved_pid"]  = hit_person["PersonID"]
+                                        dec["resolved_name"] = hit_person["AuthorFullName"]
+                                        dec["match_type"]    = "resolved"
+                                        dec["org_ids"] = hit_person.get("OrganizationIDs") or (
+                                            [hit_person["OrganizationID"]]
+                                            if hit_person.get("OrganizationID") else [""]
+                                        )
+                                        decisions[norm] = dec
+                                        st.rerun()
+                            elif typed_name != author and len(typed_name) >= 2:
+                                st.caption("No matches found in existing researchers.")
+
+                            # Show/edit PersonID — auto-populated if a match was selected
                             dec["resolved_pid"] = st.text_input(
-                                "PersonID",
+                                "PersonID (auto-filled when match selected above)",
                                 value=dec.get("resolved_pid",
                                               first.get("suggested_pid", "")),
                                 key=f"pid_{norm}",
-                            )
-                            dec["resolved_name"] = st.text_input(
-                                "Author Full Name",
-                                value=dec.get("resolved_name", author),
-                                key=f"name_{norm}",
                             )
 
                     with id_col2:
