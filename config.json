@@ -11,7 +11,9 @@
   "fuzzy_threshold": 0.85,
   "interactive_mode": true,
   "allow_multi_org": true,
-  "new_person_id_start": 9000,
   "output_dir": "output",
-  "db_path": "staging.db"
+  "db_path": "staging.db",
+  "initial_expansion_enabled": true,
+  "initial_expansion_auto_confirm": false,
+  "sibling_grouping_enabled": true
 }
