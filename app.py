@@ -216,9 +216,8 @@ with st.sidebar:
         "Allow multiple organizations per author",
         value=bool(cfg.get("allow_multi_org", True))
     )
-    cfg["new_person_id_start"] = st.number_input(
-        "New PersonID starts at", min_value=1000, max_value=999999,
-        value=int(cfg.get("new_person_id_start", 9000)), step=1
+    st.caption(
+        "New PersonIDs are assigned automatically as max(existing) + 1"
     )
 
     st.markdown("---")
@@ -351,7 +350,9 @@ with tab_load:
             records               = parse_wos_csv(wos_content)
             muv_pairs             = extract_muv_author_pairs(records, cfg)
 
-            start_pid = max(int(cfg["new_person_id_start"]), max_pid + 1)
+            # Always start above the highest existing PersonID in the master file
+            # so new IDs never clash with previously uploaded records
+            start_pid = max_pid + 1
 
             # ── KEY FIX: pass res_content so InitialAwareMatcher gets built ──
             batch_result = batch_process(
