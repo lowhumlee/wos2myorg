@@ -148,6 +148,28 @@ div.stDownloadButton > button {
     margin-bottom: 6px;
     display: inline-block;
 }
+
+/* ── Decision status pills (shown in minimized expander label) ── */
+.status-done {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    background: #d4edda;
+    color: #155724;
+    margin-left: 6px;
+}
+.status-rejected {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    background: #f8d7da;
+    color: #721c24;
+    margin-left: 6px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -410,10 +432,13 @@ with tab_review:
         fcol1, fcol2, fcol3 = st.columns([2, 2, 1])
         with fcol1:
             ftype = st.selectbox("Filter", [
+                "Pending decisions only",
                 "All needing review",
                 "New persons only",
                 "Fuzzy matches only",
                 "Initial-expansion matches only",
+                "Approved",
+                "Rejected",
             ])
         with fcol2:
             fsearch = st.text_input("Search author name", "")
@@ -471,6 +496,29 @@ with tab_review:
 
             sorted_items = sorted(by_norm.items(), key=sort_key)
 
+            # Progress summary
+            total_items   = len(sorted_items)
+            decided_items = sum(
+                1 for norm, _ in sorted_items
+                if norm in decisions
+            )
+            approved_items  = sum(
+                1 for norm, _ in sorted_items
+                if decisions.get(norm, {}).get("approved", True) and norm in decisions
+            )
+            rejected_items  = decided_items - approved_items
+            pending_items   = total_items - decided_items
+
+            st.markdown(
+                f'<div style="margin:0.5rem 0 1rem;font-size:0.88rem;color:#555;">'
+                f'<b>{total_items}</b> entries &nbsp;·&nbsp; '
+                f'<span style="color:#1e8449"><b>{approved_items}</b> approved</span> &nbsp;·&nbsp; '
+                f'<span style="color:#c0392b"><b>{rejected_items}</b> rejected</span> &nbsp;·&nbsp; '
+                f'<span style="color:#d35400"><b>{pending_items}</b> pending</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
             prev_sibling_group = None
 
             for norm, items in sorted_items:
@@ -479,10 +527,20 @@ with tab_review:
                 author = first["AuthorFullName"]
                 sibling_group = first.get("SiblingGroup", author)
 
+                # ── Determine current decision status ─────────────────────────
+                dec_current  = decisions.get(norm)
+                is_decided   = dec_current is not None
+                is_approved  = is_decided and dec_current.get("approved", True)
+                is_rejected  = is_decided and not dec_current.get("approved", True)
+
+                # Apply filter
+                if ftype == "Pending decisions only"  and is_decided:   continue
+                if ftype == "Approved"                and not is_approved: continue
+                if ftype == "Rejected"                and not is_rejected: continue
+
                 # ── Sibling group divider ─────────────────────────────────────
                 if sibling_group != prev_sibling_group:
                     prev_sibling_group = sibling_group
-                    # Count how many distinct norms share this sibling group
                     sibling_norms = [
                         n for n, its in sorted_items
                         if its[0].get("SiblingGroup", its[0]["AuthorFullName"]) == sibling_group
@@ -504,9 +562,23 @@ with tab_review:
                 }.get(mt, "")
 
                 uts_str = ", ".join(i["UT"] for i in items)
-                label   = f"{author}  —  {len(items)} document(s)"
 
-                with st.expander(label, expanded=(mt in ("fuzzy", "initial_expansion"))):
+                # ── Build expander label with status suffix ───────────────────
+                if is_rejected:
+                    label = f"❌  {author}  —  {len(items)} document(s)  · REJECTED"
+                elif is_approved and is_decided:
+                    resolved = dec_current.get("resolved_name", author)
+                    org_ids  = [o for o in dec_current.get("org_ids", []) if o]
+                    org_str  = ", ".join(org_ids) if org_ids else "no org"
+                    label    = f"✅  {author}  →  {resolved}  [{org_str}]"
+                else:
+                    label    = f"⏳  {author}  —  {len(items)} document(s)"
+
+                # Approved entries start collapsed; pending/rejected start expanded
+                # only if they still need attention
+                should_expand = not is_decided and mt in ("fuzzy", "initial_expansion")
+
+                with st.expander(label, expanded=should_expand):
                     st.markdown(badge_html, unsafe_allow_html=True)
 
                     # MUV affiliation chips
