@@ -213,7 +213,8 @@ def run_interactive(
         if researcher_df is not None else None
     )
 
-    start_pid   = max(int(cfg.get("new_person_id_start", 9000)), max_pid + 1)
+    # Always start above the highest existing PersonID — never re-use IDs
+    start_pid   = max_pid + 1
     pid_counter = start_pid
     multi_org   = cfg.get("allow_multi_org", True)
 
@@ -409,7 +410,8 @@ def run_batch(
     records   = parse_wos_csv(wos_content)
     muv_pairs = extract_muv_author_pairs(records, cfg)
 
-    start_pid = max(int(cfg.get("new_person_id_start", 9000)), max_pid + 1)
+    # Always start above the highest existing PersonID — never re-use IDs
+    start_pid = max_pid + 1
 
     # ── KEY FIX: pass researcher_content so InitialAwareMatcher gets built ───
     result = batch_process(
