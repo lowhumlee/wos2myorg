@@ -39,7 +39,6 @@ DEFAULT_CONFIG: dict = {
     "fuzzy_threshold": 0.85,
     "interactive_mode": True,
     "allow_multi_org": True,
-    "new_person_id_start": 9000,
     "output_dir": "output",
     "db_path": "staging.db",
     # New settings for initial-expansion matching
@@ -342,7 +341,7 @@ def group_new_authors(new_records: List[Dict]) -> List[Dict]:
 
 def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
                   orgs: List[Dict] | Dict, cfg: dict,
-                  start_pid: int = 9000,
+                  start_pid: int = 0,
                   researcher_csv_content: str = ""):
     """
     Processes extracted pairs against the person index.
@@ -552,8 +551,12 @@ def _split_full_name(full_name: str) -> tuple[str, str]:
     # No comma — treat the whole string as last name, first name empty
     return "", full_name.strip()
 
+
 def build_upload_csv(affiliations: List[Dict], source_file: str = "manual_entry") -> str:
-    """Produces CSV in the exact column order required by WoS My Organization."""
+    """
+    Produces a CSV in the exact column order required by WoS My Organization:
+      PersonID | FirstName | LastName | OrganizationID | DocumentID
+    """
     output = io.StringIO()
     fieldnames = ["PersonID", "FirstName", "LastName", "OrganizationID", "DocumentID"]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
