@@ -553,11 +553,16 @@ def _split_full_name(full_name: str) -> tuple[str, str]:
     return "", full_name.strip()
 
 
+ef _split_full_name(full_name: str) -> tuple[str, str]:
+    """Split 'Lastname, Firstname' into (first_name, last_name)."""
+    if "," in full_name:
+        last, first = full_name.split(",", 1)
+        return first.strip(), last.strip()
+    return "", full_name.strip()
+
+
 def build_upload_csv(affiliations: List[Dict], source_file: str = "manual_entry") -> str:
-    """
-    Produces a CSV in the exact column order required by WoS My Organization:
-      PersonID | FirstName | LastName | OrganizationID | DocumentID
-    """
+    """Produces CSV in the exact column order required by WoS My Organization."""
     output = io.StringIO()
     fieldnames = ["PersonID", "FirstName", "LastName", "OrganizationID", "DocumentID"]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
