@@ -91,18 +91,21 @@ def name_similarity(a: str, b: str) -> float:
 
 # ─── Data Parsing ─────────────────────────────────────────────────────────────
 
-def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
+def build_person_index(csv_content: str) -> tuple[List[Dict], int, set]:
     """
     Parses ResearcherAndDocument.csv.
-    Returns: (list of unique persons, max PersonID found).
+    Returns: (list of unique persons, max PersonID found, existing_pairs).
+
+    existing_pairs is a set of (PersonID, DocumentID) tuples already in MyOrg —
+    used by batch_process to skip re-uploading documents already linked to a person.
 
     Each person dict contains:
       "OrganizationID"  - first org ID seen (kept for backward compat)
       "OrganizationIDs" - deduplicated list of ALL org IDs for this person
-                          (a person can appear on multiple rows with different orgs)
     """
     persons = {}
     max_pid = 0
+    existing_pairs: set[tuple[str, str]] = set()
     f = io.StringIO(csv_content.strip())
     reader = csv.DictReader(f)
     for row in reader:
@@ -117,7 +120,12 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
         except ValueError:
             pass
 
-        oid = row.get("OrganizationID", "").strip()
+        oid    = row.get("OrganizationID", "").strip()
+        doc_id = row.get("DocumentID", "").strip()
+
+        # Always record this (person, document) pair as already existing
+        if doc_id:
+            existing_pairs.add((pid_str, doc_id))
 
         if pid_str in persons:
             # Person already recorded — just accumulate extra org IDs
@@ -149,7 +157,7 @@ def build_person_index(csv_content: str) -> tuple[List[Dict], int]:
             "OrganizationID":  oid,
             "OrganizationIDs": [oid] if oid else [],
         }
-    return list(persons.values()), max_pid
+    return list(persons.values()), max_pid, existing_pairs
 
 
 def build_researcher_dataframe(csv_content: str):
@@ -342,7 +350,8 @@ def group_new_authors(new_records: List[Dict]) -> List[Dict]:
 def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
                   orgs: List[Dict] | Dict, cfg: dict,
                   start_pid: int = 0,
-                  researcher_csv_content: str = ""):
+                  researcher_csv_content: str = "",
+                  existing_pairs: set | None = None):
     """
     Processes extracted pairs against the person index.
 
@@ -351,14 +360,20 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
     researcher_csv_content : str
         Raw CSV content of ResearcherAndDocument.csv.
         Used to build the InitialAwareMatcher.
-        Pass an empty string to fall back to the original matching logic.
+    existing_pairs : set of (PersonID, DocumentID) tuples
+        Already-uploaded combinations from ResearcherAndDocument.csv.
+        Any WoS pair whose (matched_PersonID, UT) is in this set is skipped
+        as already present in MyOrg.
 
-    Returns a dict with 'confirmed', 'needs_review', and 'new_persons'.
+    Returns a dict with 'confirmed', 'needs_review', 'new_persons',
+    and 'already_uploaded' (list of skipped pairs).
     """
-    confirmed      = []
-    needs_review   = []
+    confirmed        = []
+    needs_review     = []
+    already_uploaded = []
     new_persons_staged = {}
 
+    existing_pairs = existing_pairs or set()
     pid_counter = start_pid
     threshold   = float(cfg.get("fuzzy_threshold", 0.85))
 
@@ -425,13 +440,21 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
         if match_type == "exact":
             p = candidates[0][1]
             for pair in pairs:
-                confirmed.append({
-                    **pair,
-                    "match_type": "exact",
-                    "PersonID": p["PersonID"],
-                    "AuthorFullName": p["AuthorFullName"],
-                    "OrganizationID": p.get("OrganizationID", ""),
-                })
+                if (p["PersonID"], pair["UT"]) in existing_pairs:
+                    already_uploaded.append({
+                        **pair,
+                        "PersonID":       p["PersonID"],
+                        "AuthorFullName": p["AuthorFullName"],
+                        "Reason":         "Already in MyOrg",
+                    })
+                else:
+                    confirmed.append({
+                        **pair,
+                        "match_type":    "exact",
+                        "PersonID":      p["PersonID"],
+                        "AuthorFullName": p["AuthorFullName"],
+                        "OrganizationID": p.get("OrganizationID", ""),
+                    })
 
         elif match_type == "fuzzy":
             # Determine the display label for the match sub-type
@@ -485,9 +508,10 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
                 })
 
     return {
-        "confirmed": confirmed,
-        "needs_review": needs_review,
-        "new_persons": list(new_persons_staged.values()),
+        "confirmed":        confirmed,
+        "needs_review":     needs_review,
+        "new_persons":      list(new_persons_staged.values()),
+        "already_uploaded": already_uploaded,
     }
 
 
