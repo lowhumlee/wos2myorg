@@ -381,7 +381,7 @@ with tab_load:
             wos_file.seek(0)
             wos_content = wos_file.read().decode("utf-8-sig")
 
-            person_index, max_pid = build_person_index(res_content)
+            person_index, max_pid, existing_pairs = build_person_index(res_content)
             orgs                  = parse_org_hierarchy(org_content)
             records               = parse_wos_csv(wos_content)
             muv_pairs             = extract_muv_author_pairs(records, cfg)
@@ -390,10 +390,10 @@ with tab_load:
             # so new IDs never clash with previously uploaded records
             start_pid = max_pid + 1
 
-            # ── KEY FIX: pass res_content so InitialAwareMatcher gets built ──
             batch_result = batch_process(
                 muv_pairs, person_index, orgs, cfg, start_pid,
                 researcher_csv_content=res_content,
+                existing_pairs=existing_pairs,
             )
 
             # Build decisions dict for interactive review
@@ -431,6 +431,7 @@ with tab_load:
         n_new          = len([r for r in review    if r.get("match_type") == "new"])
         n_fuzzy        = len([r for r in review    if r.get("match_type") == "fuzzy"])
         n_initial      = len([r for r in review    if r.get("match_type") == "initial_expansion"])
+        n_uploaded     = len(batch_result.get("already_uploaded", []))
 
         st.markdown(f"""
 <div class="metric-grid">
@@ -440,8 +441,12 @@ with tab_load:
   <div class="metric-card"><div class="num num-yellow">{n_initial}</div><div class="lbl">Initial-Expansion Matches</div></div>
   <div class="metric-card"><div class="num num-yellow">{n_fuzzy}</div><div class="lbl">Fuzzy / Ambiguous</div></div>
   <div class="metric-card"><div class="num num-orange">{len(review)}</div><div class="lbl">Needs Review</div></div>
+  <div class="metric-card"><div class="num" style="color:#888">{n_uploaded}</div><div class="lbl">Already in MyOrg</div></div>
 </div>
 """, unsafe_allow_html=True)
+        if n_uploaded:
+            st.info(f"ℹ️ **{n_uploaded} pair(s) skipped** — already present in ResearcherAndDocument.csv "
+                    f"and do not need re-uploading.")
 
         if len(review) > 0:
             st.info(f"➡️ **{len(review)} entries need your decision.** Go to Tab 2 to review.")
