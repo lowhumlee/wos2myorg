@@ -201,32 +201,76 @@ def parse_wos_csv(csv_content: str) -> List[Dict]:
 
 # ─── Extraction Logic ─────────────────────────────────────────────────────────
 
+def _is_muv_affiliation(affil_norm: str, patterns: list[str]) -> bool:
+    """
+    Returns True if the normalised affiliation string matches ANY configured
+    MUV pattern OR any of the hard-coded fallback variants that cover the
+    official full institution name and reversed word-order forms used in WoS.
+
+    Hard-coded fallbacks (in addition to config patterns):
+      - "med univ prof dr paraskev stoyanov varna"  (official full name)
+      - "varna med univ"                            (reversed word order)
+      - "paraskev stoyanov varna"                   (partial official name)
+    """
+    FALLBACK_PATTERNS = [
+        "med univ prof dr paraskev stoyanov varna",
+        "varna med univ",
+        "paraskev stoyanov varna",
+    ]
+    all_patterns = list(patterns) + FALLBACK_PATTERNS
+    return any(p in affil_norm for p in all_patterns)
+
+
 def extract_muv_author_pairs(wos_records: List[Dict], cfg: dict) -> List[Dict]:
     """
-    Extracts (Author, Affiliation, UT) tuples where affiliation matches MUV patterns.
+    Extracts one consolidated row per (author, UT) for every WoS author who
+    has at least one MUV-matching affiliation block in the C1 field.
+
+    Key behaviours
+    --------------
+    * An author who appears in N different MUV C1 blocks (e.g. listed under
+      both "Dept Physiol" and "Vasc Biol Res Grp") produces exactly ONE row
+      with all MUV affiliation strings merged into muv_affils — avoiding the
+      duplicate-row / inflated-count bug.
+    * Matching uses the configured patterns PLUS hard-coded fallbacks for the
+      official full institution name and reversed word-order forms that WoS
+      sometimes exports.
     """
-    extracted = []
-    patterns = [p.lower() for p in cfg.get("muv_affiliation_patterns", [])]
+    patterns = [p.lower() for p in cfg.get("muv_affiliation_patterns", []) if p.strip()]
+
+    # key: (author_name, ut) → list of unique MUV affiliation strings
+    merged: dict[tuple[str, str], list[str]] = {}
 
     for rec in wos_records:
-        ut = rec.get("UT")
+        ut = (rec.get("UT") or "").strip()
         c1 = rec.get("C1", "")
-        if not c1: continue
+        if not c1 or not ut:
+            continue
 
         blocks = re.findall(r'\[(.*?)\]\s*([^\[]+)', c1)
         for authors_str, affil_str in blocks:
             affil_norm = normalize_name(affil_str)
-            if any(p in affil_norm for p in patterns):
-                authors = [a.strip() for a in authors_str.split(';')]
-                for auth in authors:
-                    extracted.append({
-                        "author_full": auth,
-                        "AuthorName": auth,
-                        "RawAffil": affil_str.strip(),
-                        "muv_affils": [affil_str.strip()],
-                        "ut": ut,
-                        "UT": ut,
-                    })
+            if not _is_muv_affiliation(affil_norm, patterns):
+                continue
+            authors = [a.strip() for a in authors_str.split(';') if a.strip()]
+            affil_clean = affil_str.strip()
+            for auth in authors:
+                key = (auth, ut)
+                if key not in merged:
+                    merged[key] = []
+                if affil_clean not in merged[key]:
+                    merged[key].append(affil_clean)
+
+    extracted = []
+    for (auth, ut), muv_affils in merged.items():
+        extracted.append({
+            "author_full": auth,
+            "AuthorName":  auth,
+            "RawAffil":    muv_affils[0],   # primary affil for legacy fields
+            "muv_affils":  muv_affils,
+            "ut":          ut,
+            "UT":          ut,
+        })
     return extracted
 
 
@@ -445,6 +489,8 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
                         **pair,
                         "PersonID":       p["PersonID"],
                         "AuthorFullName": p["AuthorFullName"],
+                        "OrganizationID": p.get("OrganizationID", ""),
+                        "match_type":     "exact",
                         "Reason":         "Already in MyOrg",
                     })
                 else:
