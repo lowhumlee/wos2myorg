@@ -402,14 +402,19 @@ with tab_load:
                 norm = item["norm"]
                 if norm not in decisions_by_norm:
                     # Use org IDs from the matched master record as the pre-filled default
-                    default_org_ids = item.get("suggested_org_ids") or                                       ([item["OrganizationID"]] if item.get("OrganizationID") else [""])
+                    default_org_ids = item.get("suggested_org_ids") or                                        ([item["OrganizationID"]] if item.get("OrganizationID") else [""])
+                    # New persons start un-approved (require explicit sign-off).
+                    # Fuzzy / initial_expansion matches start pre-approved
+                    # (user just needs to confirm or reject the suggested identity).
+                    mt_item = item.get("match_type", "new")
+                    auto_approve = mt_item in ("initial_expansion", "fuzzy", "resolved")
                     decisions_by_norm[norm] = {
                         **item,
                         "org_ids":       default_org_ids,
                         "resolved_pid":  item.get("suggested_pid", ""),
                         "resolved_name": item.get("suggested_name",
                                                    item.get("AuthorFullName", "")),
-                        "approved": True,
+                        "approved": auto_approve,
                     }
 
             st.session_state.person_index  = person_index
@@ -419,6 +424,7 @@ with tab_load:
             st.session_state.muv_pairs     = muv_pairs
             st.session_state.batch_result  = batch_result
             st.session_state.decisions     = decisions_by_norm
+            st.session_state.existing_pairs = existing_pairs
             st.session_state.processed     = True
             st.session_state.finalized     = False
             st.session_state.output_rows   = []
@@ -538,15 +544,16 @@ with tab_review:
 
             sorted_items = sorted(by_norm.items(), key=sort_key)
 
-            # Progress summary
+            # Progress summary — only count items where user has explicitly decided
             total_items   = len(sorted_items)
             decided_items = sum(
                 1 for norm, _ in sorted_items
-                if norm in decisions
+                if decisions.get(norm, {}).get("user_decided", False)
             )
             approved_items  = sum(
                 1 for norm, _ in sorted_items
-                if decisions.get(norm, {}).get("approved", True) and norm in decisions
+                if decisions.get(norm, {}).get("user_decided", False)
+                and decisions.get(norm, {}).get("approved", True)
             )
             rejected_items  = decided_items - approved_items
             pending_items   = total_items - decided_items
@@ -571,7 +578,9 @@ with tab_review:
 
                 # ── Determine current decision status ─────────────────────────
                 dec_current  = decisions.get(norm)
-                is_decided   = dec_current is not None
+                # user_decided = True only after the user has explicitly ticked
+                # the approve/reject checkbox (not just from pre-population at load time)
+                is_decided   = dec_current is not None and dec_current.get("user_decided", False)
                 is_approved  = is_decided and dec_current.get("approved", True)
                 is_rejected  = is_decided and not dec_current.get("approved", True)
 
@@ -613,12 +622,17 @@ with tab_review:
                     org_ids  = [o for o in dec_current.get("org_ids", []) if o]
                     org_str  = ", ".join(org_ids) if org_ids else "no org"
                     label    = f"✅  {author}  →  {resolved}  [{org_str}]"
+                elif not is_decided and mt == "initial_expansion":
+                    label    = f"🔤  {author}  —  confirm match  ({len(items)} doc)"
+                elif not is_decided and mt in ("fuzzy",):
+                    label    = f"⚠  {author}  —  review needed  ({len(items)} doc)"
+                elif not is_decided and mt == "new":
+                    label    = f"🆕  {author}  —  new person, needs org  ({len(items)} doc)"
                 else:
                     label    = f"⏳  {author}  —  {len(items)} document(s)"
 
-                # Approved entries start collapsed; pending/rejected start expanded
-                # only if they still need attention
-                should_expand = not is_decided and mt in ("fuzzy", "initial_expansion")
+                # Expand when not yet decided by user
+                should_expand = not is_decided
 
                 with st.expander(label, expanded=should_expand):
                     st.markdown(badge_html, unsafe_allow_html=True)
@@ -639,7 +653,8 @@ with tab_review:
                         "resolved_pid":  first.get("suggested_pid", ""),
                         "resolved_name": first.get("AuthorFullName", ""),
                         "org_ids":       [""],
-                        "approved":      True,
+                        "approved":      mt != "new",
+                        "user_decided":  False,
                     })
 
                     id_col1, id_col2 = st.columns(2)
@@ -747,11 +762,36 @@ with tab_review:
                             )
                             dec["org_ids"] = [org_map[sel]] if sel in org_map else [""]
 
-                    dec["approved"] = st.checkbox(
-                        "✅ Approve this entry",
-                        value=dec.get("approved", True),
-                        key=f"approve_{norm}",
-                    )
+                    st.markdown("---")
+                    ap_col, rj_col = st.columns(2)
+                    with ap_col:
+                        approved_val = st.checkbox(
+                            "✅ **Approve & include in upload**",
+                            value=dec.get("approved", mt != "new"),
+                            key=f"approve_{norm}",
+                            help="Check to include this entry in the upload-ready CSV"
+                        )
+                        if approved_val != dec.get("approved", mt != "new"):
+                            dec["user_decided"] = True
+                        dec["approved"] = approved_val
+                        # Also mark as decided once checkbox has been rendered and interacted with
+                        if f"approve_{norm}" in st.session_state:
+                            dec["user_decided"] = True
+                    with rj_col:
+                        if not dec.get("approved", True):
+                            st.markdown(
+                                '<div style="background:#fdecea;border-left:4px solid #e74c3c;'
+                                'padding:0.5rem 0.8rem;border-radius:0 6px 6px 0;margin-top:0.3rem;">'
+                                '⛔ This entry will be <b>excluded</b> from the output.</div>',
+                                unsafe_allow_html=True
+                            )
+                        else:
+                            st.markdown(
+                                '<div style="background:#eafaf1;border-left:4px solid #27ae60;'
+                                'padding:0.5rem 0.8rem;border-radius:0 6px 6px 0;margin-top:0.3rem;">'
+                                '✅ This entry will be <b>included</b> in the upload.</div>',
+                                unsafe_allow_html=True
+                            )
                     decisions[norm] = dec
 
         st.session_state.decisions = decisions
@@ -776,14 +816,19 @@ with tab_review:
             for item in needs_review:
                 needs_by_norm[item["norm"]].append(item)
 
+            existing_pairs_save = st.session_state.get("existing_pairs", set())
+
             for norm, items in needs_by_norm.items():
                 dec = decisions.get(norm)
-                if not dec or not dec.get("approved", True):
+                item_mt = items[0].get("match_type", "new")
+                # New persons require explicit approval; fuzzy/initial default to approved
+                default_approved = item_mt != "new"
+                if not dec or not dec.get("approved", default_approved):
                     for it in items:
                         rejected_rows.append({
                             "AuthorFullName": it["AuthorFullName"],
                             "UT": it["UT"],
-                            "Reason": "User rejected",
+                            "Reason": "User rejected" if dec else "No decision made",
                         })
                     continue
 
@@ -792,6 +837,15 @@ with tab_review:
                 org_ids       = dec.get("org_ids", [""])
 
                 for item in items:
+                    # Check if this (PersonID, UT) is already in MyOrg
+                    if pid and (pid, item["UT"]) in existing_pairs_save:
+                        rejected_rows.append({
+                            "AuthorFullName": resolved_name,
+                            "UT": item["UT"],
+                            "Reason": "Already in MyOrg (resolved match)",
+                        })
+                        continue
+
                     for oid in org_ids:
                         key = (pid, item["UT"], oid)
                         if key in seen:
