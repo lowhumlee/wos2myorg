@@ -433,11 +433,14 @@ with tab_load:
         review    = batch_result["needs_review"]
         new_p     = batch_result["new_persons"]
 
-        n_exact        = len([r for r in confirmed if r.get("match_type") == "exact"])
-        n_new          = len([r for r in review    if r.get("match_type") == "new"])
-        n_fuzzy        = len([r for r in review    if r.get("match_type") == "fuzzy"])
-        n_initial      = len([r for r in review    if r.get("match_type") == "initial_expansion"])
-        n_uploaded     = len(batch_result.get("already_uploaded", []))
+        already_up_all    = batch_result.get("already_uploaded", [])
+        n_exact           = len([r for r in confirmed   if r.get("match_type") == "exact"])
+        n_new             = len([r for r in review      if r.get("match_type") == "new"])
+        n_fuzzy           = len([r for r in review      if r.get("match_type") == "fuzzy"])
+        n_initial         = len([r for r in review      if r.get("match_type") == "initial_expansion"])
+        n_uploaded_exact  = len([r for r in already_up_all if r.get("match_type") != "probable_duplicate"])
+        n_prob_dup        = len([r for r in already_up_all if r.get("match_type") == "probable_duplicate"])
+        n_uploaded        = len(already_up_all)
 
         st.markdown(f"""
 <div class="metric-grid">
@@ -447,12 +450,19 @@ with tab_load:
   <div class="metric-card"><div class="num num-yellow">{n_initial}</div><div class="lbl">Initial-Expansion Matches</div></div>
   <div class="metric-card"><div class="num num-yellow">{n_fuzzy}</div><div class="lbl">Fuzzy / Ambiguous</div></div>
   <div class="metric-card"><div class="num num-orange">{len(review)}</div><div class="lbl">Needs Review</div></div>
-  <div class="metric-card"><div class="num" style="color:#888">{n_uploaded}</div><div class="lbl">Already in MyOrg</div></div>
+  <div class="metric-card"><div class="num" style="color:#888">{n_uploaded_exact}</div><div class="lbl">Already in MyOrg</div></div>
+  <div class="metric-card"><div class="num" style="color:#e67e22">{n_prob_dup}</div><div class="lbl">Probable Duplicates</div></div>
 </div>
 """, unsafe_allow_html=True)
-        if n_uploaded:
-            st.info(f"ℹ️ **{n_uploaded} pair(s) skipped** — already present in ResearcherAndDocument.csv "
+        if n_uploaded_exact:
+            st.info(f"ℹ️ **{n_uploaded_exact} pair(s) skipped** — already present in ResearcherAndDocument.csv "
                     f"and do not need re-uploading.")
+        if n_prob_dup:
+            st.warning(
+                f"⚠️ **{n_prob_dup} probable duplicate(s)** — high-confidence name matches whose "
+                f"(PersonID, UT) combination already exists in MyOrg. "
+                f"These have been skipped automatically. Review them in the **Statistics tab**."
+            )
 
         if len(review) > 0:
             st.info(f"➡️ **{len(review)} entries need your decision.** Go to Tab 2 to review.")
@@ -1053,21 +1063,45 @@ with tab_stats:
         c7.metric("Fuzzy Matches",             len([r for r in needs_review if r["match_type"] == "fuzzy"]))
         c8.metric("New Persons Staged",        len(new_persons))
 
-        c9, c10, _, __ = st.columns(4)
-        c9.metric("Needs Review",       len(needs_review))
-        c10.metric("Already in MyOrg",  len(already_up),
-                   help="(Author, UT) pairs already present in ResearcherAndDocument.csv — skipped to avoid duplicates")
+        already_up_exact = [r for r in already_up if r.get("match_type") != "probable_duplicate"]
+        already_up_prob  = [r for r in already_up if r.get("match_type") == "probable_duplicate"]
 
-        if already_up:
+        c9, c10, c11, _ = st.columns(4)
+        c9.metric("Needs Review",        len(needs_review))
+        c10.metric("Already in MyOrg",   len(already_up_exact),
+                   help="Exact (PersonID, UT) pairs already in ResearcherAndDocument.csv")
+        c11.metric("Probable Duplicates", len(already_up_prob),
+                   help="High-confidence name matches (≥0.90) whose UT already exists for that person")
+
+        if already_up_prob:
             st.markdown("---")
-            st.markdown('<div class="sec-head">⏭ Already in MyOrg (skipped)</div>', unsafe_allow_html=True)
+            st.markdown('<div class="sec-head">⚠ Probable Duplicates — auto-skipped</div>', unsafe_allow_html=True)
+            st.caption(
+                "These are high-confidence name matches (initial-expansion or fuzzy, score ≥ 0.90) "
+                "where the matched PersonID already has this UT in ResearcherAndDocument.csv. "
+                "They were skipped automatically to avoid re-uploading existing records."
+            )
+            df_prob = pd.DataFrame([{
+                "WoS Name":    r.get("author_full", r.get("AuthorFullName", "")),
+                "Matched To":  r.get("AuthorFullName", ""),
+                "PersonID":    r.get("PersonID", ""),
+                "Score":       f'{r.get("match_score", 0):.2f}',
+                "UT":          r.get("UT", r.get("ut", "")),
+                "OrgID":       r.get("OrganizationID", ""),
+                "Reason":      r.get("Reason", ""),
+            } for r in already_up_prob])
+            st.dataframe(df_prob, use_container_width=True)
+
+        if already_up_exact:
+            st.markdown("---")
+            st.markdown('<div class="sec-head">⏭ Already in MyOrg — exact skip</div>', unsafe_allow_html=True)
             df_up = pd.DataFrame([{
                 "PersonID":   r.get("PersonID", ""),
                 "Author":     r.get("AuthorFullName", ""),
                 "UT":         r.get("UT", r.get("ut", "")),
                 "OrgID":      r.get("OrganizationID", ""),
                 "Reason":     r.get("Reason", "Already in MyOrg"),
-            } for r in already_up])
+            } for r in already_up_exact])
             st.dataframe(df_up, use_container_width=True)
 
         st.markdown("---")
