@@ -513,18 +513,37 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
                 [top_person["OrganizationID"]] if top_person.get("OrganizationID") else []
             )
 
+            top_score = candidates[0][0] if candidates else 0.0
+            top_pid   = top_person.get("PersonID", "")
+
             for pair in pairs:
-                needs_review.append({
-                    **pair,
-                    "match_type": subtype,
-                    "norm": norm,
-                    "candidates": candidates,
-                    "suggested_pid":     top_person.get("PersonID", ""),
-                    "suggested_name":    top_person.get("AuthorFullName", author_full),
-                    "suggested_org_ids": suggested_org_ids,
-                    "AuthorFullName":    author_full,
-                    "SiblingGroup":      sibling_group,
-                })
+                # High-confidence single-candidate match that is already in existing_pairs
+                # → treat as probable duplicate rather than sending to open review
+                if (len(candidates) == 1
+                        and top_score >= 0.90
+                        and top_pid
+                        and (top_pid, pair["UT"]) in existing_pairs):
+                    already_uploaded.append({
+                        **pair,
+                        "PersonID":       top_pid,
+                        "AuthorFullName": top_person.get("AuthorFullName", author_full),
+                        "OrganizationID": top_person.get("OrganizationID", ""),
+                        "match_type":     "probable_duplicate",
+                        "match_score":    top_score,
+                        "Reason":         f"Probable duplicate — {subtype} match (score {top_score:.2f}) already in MyOrg",
+                    })
+                else:
+                    needs_review.append({
+                        **pair,
+                        "match_type": subtype,
+                        "norm": norm,
+                        "candidates": candidates,
+                        "suggested_pid":     top_pid,
+                        "suggested_name":    top_person.get("AuthorFullName", author_full),
+                        "suggested_org_ids": suggested_org_ids,
+                        "AuthorFullName":    author_full,
+                        "SiblingGroup":      sibling_group,
+                    })
 
         else:  # new
             resolved_name = canonical_lookup.get(norm, author_full)
