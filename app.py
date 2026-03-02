@@ -704,52 +704,91 @@ with tab_review:
                                 dec["org_ids"] = chosen_person.get("OrganizationIDs") or                                     ([chosen_person["OrganizationID"]]
                                      if chosen_person.get("OrganizationID") else [""])
                         else:
-                            # ── Live search as you type ───────────────────────
-                            typed_name = st.text_input(
-                                "Correct author name (type to search existing)",
-                                value=dec.get("resolved_name", author),
-                                key=f"name_{norm}",
-                                help="Start typing to see matches from the master researcher list",
+                            # ── Identity picker for new persons ──────────────
+                            # Build candidate list: live search + "create new" option
+                            search_query = st.text_input(
+                                "Search existing researchers",
+                                value=dec.get("search_query", author),
+                                key=f"search_{norm}",
+                                help="Type a name to find existing persons — then select below",
                             )
-                            dec["resolved_name"] = typed_name
+                            dec["search_query"] = search_query
 
-                            # Search person index with whatever is typed
                             live_hits = search_person_index(
-                                typed_name, list(st.session_state.person_index)
+                                search_query, list(st.session_state.person_index)
                             )
 
-                            if live_hits:
-                                st.caption("🔍 Possible matches — click one to select:")
-                                for hit_score, hit_person in live_hits:
-                                    hit_label = (
-                                        f"{hit_person['AuthorFullName']} "
-                                        f"· ID {hit_person['PersonID']} "
-                                        f"· {int(hit_score*100)}% match"
-                                    )
-                                    if st.button(
-                                        hit_label,
-                                        key=f"hit_{norm}_{hit_person['PersonID']}",
-                                        use_container_width=True,
-                                    ):
-                                        dec["resolved_pid"]  = hit_person["PersonID"]
-                                        dec["resolved_name"] = hit_person["AuthorFullName"]
-                                        dec["match_type"]    = "resolved"
-                                        dec["org_ids"] = hit_person.get("OrganizationIDs") or (
-                                            [hit_person["OrganizationID"]]
-                                            if hit_person.get("OrganizationID") else [""]
+                            # Build selectbox options:
+                            # option 0 = "➕ Create as NEW PERSON"
+                            # options 1..N = matched existing persons
+                            NEW_PERSON_LABEL = f"➕ Create as NEW PERSON  (ID will be {first.get('suggested_pid', 'auto')})"
+                            hit_options = [NEW_PERSON_LABEL]
+                            hit_map: dict[str, dict] = {}  # label → person dict
+                            for hit_score, hit_person in live_hits:
+                                lbl = (
+                                    f"[{hit_person['PersonID']}] {hit_person['AuthorFullName']}"
+                                    f"  ·  {int(hit_score*100)}% match"
+                                )
+                                hit_options.append(lbl)
+                                hit_map[lbl] = hit_person
+
+                            # Determine current selection index
+                            current_pid  = dec.get("resolved_pid", "")
+                            current_name = dec.get("resolved_name", author)
+                            default_sel  = 0  # new person
+                            if current_pid and current_pid != first.get("suggested_pid", ""):
+                                # A real existing person was previously selected — find in options
+                                for i, lbl in enumerate(hit_options):
+                                    if f"[{current_pid}]" in lbl:
+                                        default_sel = i
+                                        break
+                                if default_sel == 0 and current_pid:
+                                    # Previously-selected person not in current search results;
+                                    # show them as a pinned option so the selection persists
+                                    pinned_lbl = f"[{current_pid}] {current_name}  ·  selected"
+                                    hit_options.insert(1, pinned_lbl)
+                                    hit_map[pinned_lbl] = {
+                                        "PersonID": current_pid,
+                                        "AuthorFullName": current_name,
+                                        "OrganizationID": dec.get("org_ids", [""])[0],
+                                        "OrganizationIDs": dec.get("org_ids", [""]),
+                                    }
+                                    default_sel = 1
+
+                            chosen_lbl = st.selectbox(
+                                f"Identity for {author}",
+                                options=hit_options,
+                                index=default_sel,
+                                key=f"identity_new_{norm}",
+                            )
+
+                            if chosen_lbl == NEW_PERSON_LABEL:
+                                dec["resolved_pid"]  = first.get("suggested_pid", "")
+                                dec["resolved_name"] = author
+                                dec["match_type"]    = "new"
+                                dec["org_ids"]       = dec.get("org_ids") or [""]
+                                st.caption(f"Will be registered as a new person · ID {dec['resolved_pid']}")
+                            else:
+                                chosen_person = hit_map[chosen_lbl]
+                                dec["resolved_pid"]  = chosen_person["PersonID"]
+                                dec["resolved_name"] = chosen_person["AuthorFullName"]
+                                dec["match_type"]    = "resolved"
+                                dec["org_ids"] = chosen_person.get("OrganizationIDs") or (
+                                    [chosen_person["OrganizationID"]]
+                                    if chosen_person.get("OrganizationID") else [""]
+                                )
+                                # Check immediately if this is a duplicate
+                                ep = st.session_state.get("existing_pairs", set())
+                                for it in items:
+                                    if (chosen_person["PersonID"], it["UT"]) in ep:
+                                        st.warning(
+                                            f"⚠️ **Probable duplicate** — "
+                                            f"{chosen_person['AuthorFullName']} (ID {chosen_person['PersonID']}) "
+                                            f"is already linked to **{it['UT']}** in MyOrg. "
+                                            f"If you approve this, it will be **skipped** (not re-uploaded).",
+                                            icon="🔁",
                                         )
-                                        decisions[norm] = dec
-                                        st.rerun()
-                            elif typed_name != author and len(typed_name) >= 2:
-                                st.caption("No matches found in existing researchers.")
-
-                            # Show/edit PersonID — auto-populated if a match was selected
-                            dec["resolved_pid"] = st.text_input(
-                                "PersonID (auto-filled when match selected above)",
-                                value=dec.get("resolved_pid",
-                                              first.get("suggested_pid", "")),
-                                key=f"pid_{norm}",
-                            )
+                                        break
 
                     with id_col2:
                         if cfg.get("allow_multi_org", True):
@@ -842,12 +881,17 @@ with tab_review:
                         })
                     continue
 
-                pid           = dec.get("resolved_pid", "")
+                pid           = str(dec.get("resolved_pid", "")).strip()
+                # Fall back to staged PID only if resolved_pid is genuinely empty
+                # (i.e. user never selected anything — shouldn't happen with new UI)
+                if not pid:
+                    pid = str(items[0].get("suggested_pid", "")).strip()
                 resolved_name = dec.get("resolved_name", items[0]["AuthorFullName"])
-                org_ids       = dec.get("org_ids", [""])
+                org_ids       = [o for o in dec.get("org_ids", [""]) if o] or [""]
 
                 for item in items:
                     # Check if this (PersonID, UT) is already in MyOrg
+                    # Catches cases where user resolved a 'new' person to an existing PID
                     if pid and (pid, item["UT"]) in existing_pairs_save:
                         rejected_rows.append({
                             "AuthorFullName": resolved_name,
