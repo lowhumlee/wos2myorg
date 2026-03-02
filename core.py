@@ -204,12 +204,15 @@ def parse_wos_csv(csv_content: str) -> List[Dict]:
 def extract_muv_author_pairs(wos_records: List[Dict], cfg: dict) -> List[Dict]:
     """
     Extracts (Author, Affiliation, UT) tuples where affiliation matches MUV patterns.
+    Deduplicates identical (Author, UT) pairs within the input set.
     """
     extracted = []
+    seen_in_batch: set[tuple[str, str]] = set()
     patterns = [p.lower() for p in cfg.get("muv_affiliation_patterns", [])]
 
     for rec in wos_records:
-        ut = rec.get("UT")
+        ut = str(rec.get("UT", "")).strip()
+        if not ut: continue
         c1 = rec.get("C1", "")
         if not c1: continue
 
@@ -219,6 +222,11 @@ def extract_muv_author_pairs(wos_records: List[Dict], cfg: dict) -> List[Dict]:
             if any(p in affil_norm for p in patterns):
                 authors = [a.strip() for a in authors_str.split(';')]
                 for auth in authors:
+                    # Intra-file/batch deduplication of identical (Author, UT) pairs
+                    if (auth, ut) in seen_in_batch:
+                        continue
+                    seen_in_batch.add((auth, ut))
+
                     extracted.append({
                         "author_full": auth,
                         "AuthorName": auth,
@@ -261,7 +269,7 @@ def match_person(author_name: str, person_index: List[Dict], threshold: float | 
             if p:
                 return "exact", [(1.0, p, 1.0)]
 
-        if result.kind in ("initial_expansion", "fuzzy"):
+        if result.kind in ("initial_expansion", "fuzzy", "initial_match"):
             candidates = []
             for c in result.candidates:
                 p = next((p for p in person_index if p["PersonID"] == c.person_id), None)
@@ -373,7 +381,11 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
     already_uploaded = []
     new_persons_staged = {}
 
-    existing_pairs = existing_pairs or set()
+    # Standardize existing pairs for robust comparison
+    existing_pairs = { (str(pid), str(ut).strip()) for pid, ut in (existing_pairs or set()) }
+    
+    # Track pairs processed in THIS run to avoid intra-batch duplicates
+    seen_in_run: set[tuple[str, str]] = set()
     pid_counter = start_pid
     threshold   = float(cfg.get("fuzzy_threshold", 0.85))
 
@@ -439,22 +451,38 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
 
         if match_type == "exact":
             p = candidates[0][1]
+            pid = str(p["PersonID"])
             for pair in pairs:
-                if (p["PersonID"], pair["UT"]) in existing_pairs:
+                ut = str(pair["UT"]).strip()
+                
+                # Check 1: Already in MyOrg (ResearcherAndDocument.csv)
+                if (pid, ut) in existing_pairs:
                     already_uploaded.append({
                         **pair,
-                        "PersonID":       p["PersonID"],
+                        "PersonID":       pid,
                         "AuthorFullName": p["AuthorFullName"],
                         "Reason":         "Already in MyOrg",
                     })
-                else:
-                    confirmed.append({
+                    continue
+
+                # Check 2: Intra-batch duplicate (already processed in this run)
+                if (pid, ut) in seen_in_run:
+                    already_uploaded.append({
                         **pair,
-                        "match_type":    "exact",
-                        "PersonID":      p["PersonID"],
+                        "PersonID":       pid,
                         "AuthorFullName": p["AuthorFullName"],
-                        "OrganizationID": p.get("OrganizationID", ""),
+                        "Reason":         "Intra-batch duplicate",
                     })
+                    continue
+
+                seen_in_run.add((pid, ut))
+                confirmed.append({
+                    **pair,
+                    "match_type":    "exact",
+                    "PersonID":      pid,
+                    "AuthorFullName": p["AuthorFullName"],
+                    "OrganizationID": p.get("OrganizationID", ""),
+                })
 
         elif match_type == "fuzzy":
             # Determine the display label for the match sub-type
@@ -463,17 +491,43 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
 
             # Carry the matched person's org IDs as the suggested default selection
             top_person = candidates[0][1] if candidates else {}
+            suggested_pid = str(top_person.get("PersonID", ""))
             suggested_org_ids = top_person.get("OrganizationIDs") or (
                 [top_person["OrganizationID"]] if top_person.get("OrganizationID") else []
             )
 
             for pair in pairs:
+                ut = str(pair["UT"]).strip()
+                
+                # For fuzzy matches, we still check against existing MyOrg pairs
+                # using the top suggested PersonID as a baseline
+                if suggested_pid and (suggested_pid, ut) in existing_pairs:
+                    already_uploaded.append({
+                        **pair,
+                        "PersonID":       suggested_pid,
+                        "AuthorFullName": top_person.get("AuthorFullName", author_full),
+                        "Reason":         "Already in MyOrg (suggested match)",
+                    })
+                    continue
+
+                if suggested_pid and (suggested_pid, ut) in seen_in_run:
+                    already_uploaded.append({
+                        **pair,
+                        "PersonID":       suggested_pid,
+                        "AuthorFullName": top_person.get("AuthorFullName", author_full),
+                        "Reason":         "Intra-batch duplicate",
+                    })
+                    continue
+
+                # For fuzzy matches, we DO NOT add to seen_in_run yet because
+                # the user might reject this match in the review stage.
+                # However, we still add it to needs_review.
                 needs_review.append({
                     **pair,
                     "match_type": subtype,
                     "norm": norm,
                     "candidates": candidates,
-                    "suggested_pid":     top_person.get("PersonID", ""),
+                    "suggested_pid":     suggested_pid,
                     "suggested_name":    top_person.get("AuthorFullName", author_full),
                     "suggested_org_ids": suggested_org_ids,
                     "AuthorFullName":    author_full,
@@ -496,6 +550,18 @@ def batch_process(muv_pairs: List[Dict], person_index: List[Dict],
             pid = new_persons_staged[canon_norm]["PersonID"]
 
             for pair in pairs:
+                ut = str(pair["UT"]).strip()
+                
+                if (pid, ut) in seen_in_run:
+                    already_uploaded.append({
+                        **pair,
+                        "PersonID":       pid,
+                        "AuthorFullName": resolved_name,
+                        "Reason":         "Intra-batch duplicate",
+                    })
+                    continue
+
+                seen_in_run.add((pid, ut))
                 needs_review.append({
                     **pair,
                     "match_type": "new",

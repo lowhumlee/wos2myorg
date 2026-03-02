@@ -200,10 +200,13 @@ def run_interactive(
     ts        = datetime.now().strftime("%Y%m%d_%H%M%S")
     db        = StagingDB(os.path.join(out_dir, cfg.get("db_path", "staging.db")))
 
-    person_index, max_pid = build_person_index(researcher_content)
+    person_index, max_pid, existing_pairs = build_person_index(researcher_content)
     orgs      = parse_org_hierarchy(org_content)
     records   = parse_wos_csv(wos_content)
     muv_pairs = extract_muv_author_pairs(records, cfg)
+    
+    # Standardize existing pairs for robust comparison
+    existing_pairs = { (str(pid), str(ut).strip()) for pid, ut in existing_pairs }
 
     # Build InitialAwareMatcher so interactive mode benefits from initial-expansion
     researcher_df  = build_researcher_dataframe(researcher_content)
@@ -221,7 +224,7 @@ def run_interactive(
     output_rows: list[dict]        = []
     rejected: list[dict]           = []
     new_persons_created: dict[str, dict] = {}
-    seen_pairs: set[tuple]         = set()
+    seen_in_run: set[tuple[str, str]] = set()
 
     author_groups: dict[str, list[dict]] = defaultdict(list)
     for pair in muv_pairs:
@@ -249,11 +252,29 @@ def run_interactive(
         # Resolve identity
         if match_type == "exact":
             person        = candidates[0][1]
-            pid           = person["PersonID"]
+            pid           = str(person["PersonID"])
             resolved_name = person["AuthorFullName"]
             suggested_org_ids = person.get("OrganizationIDs") or (
                 [person["OrganizationID"]] if person.get("OrganizationID") else []
             )
+            
+            # Check for existing records or duplicates in current run
+            # We check this for each document in the group
+            valid_pairs = []
+            for pair in pairs:
+                ut = str(pair["ut"]).strip()
+                if (pid, ut) in existing_pairs:
+                    cprint(f"  [yellow]⚠ Skipping {ut}: Already in MyOrg[/yellow]")
+                    continue
+                if (pid, ut) in seen_in_run:
+                    cprint(f"  [yellow]⚠ Skipping {ut}: Intra-batch duplicate[/yellow]")
+                    continue
+                valid_pairs.append(pair)
+            
+            if not valid_pairs:
+                cprint(f"  [dim]All documents for this author already processed or exist.[/dim]")
+                continue
+
             cprint(f"  [green]✓ Exact match:[/green] {resolved_name} (PersonID {pid})")
             db.log_decision(pid, "exact_match", author_full)
 
@@ -321,16 +342,16 @@ def run_interactive(
                 org_ids = [""]
 
             for org_id in org_ids:
-                key = (pid, ut, org_id)
-                if key in seen_pairs:
-                    db.log_rejected(author_full, ut, f"Duplicate pair {key}")
+                # Deduplicate at (PersonID, UT) level
+                if (pid, ut) in existing_pairs or (pid, ut) in seen_in_run:
+                    db.log_rejected(author_full, ut, f"Duplicate (pid, ut)")
                     rejected.append({
                         "AuthorFullName": author_full,
                         "UT": ut,
                         "Reason": "Duplicate",
                     })
                     continue
-                seen_pairs.add(key)
+                seen_in_run.add((pid, ut))
                 output_rows.append({
                     "PersonID":       pid,
                     "AuthorFullName": resolved_name,
@@ -405,7 +426,7 @@ def run_batch(
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     db = StagingDB(os.path.join(out_dir, cfg.get("db_path", "staging.db")))
 
-    person_index, max_pid = build_person_index(researcher_content)
+    person_index, max_pid, existing_pairs = build_person_index(researcher_content)
     orgs      = parse_org_hierarchy(org_content)
     records   = parse_wos_csv(wos_content)
     muv_pairs = extract_muv_author_pairs(records, cfg)
@@ -413,14 +434,16 @@ def run_batch(
     # Always start above the highest existing PersonID — never re-use IDs
     start_pid = max_pid + 1
 
-    # ── KEY FIX: pass researcher_content so InitialAwareMatcher gets built ───
+    # ── KEY FIX: pass researcher_content AND existing_pairs ───
     result = batch_process(
         muv_pairs, person_index, orgs, cfg, start_pid,
         researcher_csv_content=researcher_content,
+        existing_pairs=existing_pairs,
     )
-    confirmed    = result["confirmed"]
-    needs_review = result["needs_review"]
-    new_persons  = result["new_persons"]
+    confirmed        = result["confirmed"]
+    needs_review     = result["needs_review"]
+    new_persons      = result["new_persons"]
+    already_uploaded = result.get("already_uploaded", [])
 
     # Write confirmed rows to upload-ready CSV
     csv_path = os.path.join(out_dir, f"upload_ready_{ts}.csv")
@@ -460,7 +483,7 @@ def run_batch(
                 "fuzzy_matches":             n_fuzzy,
                 "new_persons":               n_new,
                 "finalized_records":         n_exact,
-                "rejected_records":          0,
+                "rejected_records":          len(already_uploaded),
             },
             new_persons=new_list,
         ),
@@ -474,6 +497,7 @@ def run_batch(
     cprint(f"  Initial-exp matches  : {n_initial}")
     cprint(f"  Fuzzy matches        : {n_fuzzy}")
     cprint(f"  New persons staged   : {n_new}")
+    cprint(f"  Skipped (Duplicates) : {len(already_uploaded)}")
     cprint(f"  Upload CSV           : {csv_path}")
     cprint(f"  Audit log            : {audit_path}")
 
