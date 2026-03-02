@@ -991,11 +991,30 @@ with tab_stats:
         c3.metric("Existing Persons",      len(person_index))
         c4.metric("Organizations",         len(orgs))
 
+        already_up = batch_result.get("already_uploaded", [])
+
         c5, c6, c7, c8 = st.columns(4)
         c5.metric("Auto-Confirmed (exact)",    len(confirmed))
         c6.metric("Initial-Expansion Matches", len([r for r in needs_review if r["match_type"] == "initial_expansion"]))
         c7.metric("Fuzzy Matches",             len([r for r in needs_review if r["match_type"] == "fuzzy"]))
         c8.metric("New Persons Staged",        len(new_persons))
+
+        c9, c10, _, __ = st.columns(4)
+        c9.metric("Needs Review",       len(needs_review))
+        c10.metric("Already in MyOrg",  len(already_up),
+                   help="(Author, UT) pairs already present in ResearcherAndDocument.csv — skipped to avoid duplicates")
+
+        if already_up:
+            st.markdown("---")
+            st.markdown('<div class="sec-head">⏭ Already in MyOrg (skipped)</div>', unsafe_allow_html=True)
+            df_up = pd.DataFrame([{
+                "PersonID":   r.get("PersonID", ""),
+                "Author":     r.get("AuthorFullName", ""),
+                "UT":         r.get("UT", r.get("ut", "")),
+                "OrgID":      r.get("OrganizationID", ""),
+                "Reason":     r.get("Reason", "Already in MyOrg"),
+            } for r in already_up])
+            st.dataframe(df_up, use_container_width=True)
 
         st.markdown("---")
 
