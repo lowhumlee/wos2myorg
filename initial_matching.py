@@ -115,49 +115,56 @@ def _is_initial(token: str) -> bool:
     return len(token) == 1 and token.isalpha()
 
 
-def _initials_compatible(wos_parts: list[str], master_parts: list[str]) -> bool:
+def _initials_compatible(wos_parts: list[str], master_parts: list[str],
+                         name_fuzzy_threshold: float = 0.80) -> bool:
     """
     Check whether the WoS name parts are compatible with the master name parts.
 
     Rules
     -----
-    * The WoS name may have *fewer* parts than the master (extra trailing parts
-      in master are allowed — e.g. WoS "N." is compatible with master "Nikolay R.").
-    * For each WoS part:
-        - If the WoS token is an initial → the corresponding master token must
-          start with that initial.
-        - If the WoS token is a full name → either it equals the master token,
-          OR the master token is an initial of it.
-    * The master may NOT have fewer parts than the WoS (e.g. WoS "N. R." is NOT
-      compatible with master "Nikolay" because the second initial has no match).
+    * WoS may have fewer parts than master (extra master parts allowed).
+    * Master may have fewer parts than WoS ONLY when the extra WoS parts are
+      full words (a second given name / patronymic absent from the master).
+      Extra WoS *initials* with no master counterpart are a hard reject.
+    * Per-token comparison:
+        - WoS initial  -> master token must start with it.
+        - WoS full word, master initial -> master initial must match first letter.
+        - WoS full word, master full word -> exact OR fuzzy >= name_fuzzy_threshold
+          (handles transliteration variants like Denitsa / Denitza).
 
     Examples
     --------
-    wos ["n"]          master ["nikolay"]          → True
-    wos ["n"]          master ["nikolay", "r"]     → True  (extra master part OK)
-    wos ["n", "r"]     master ["nikolay"]          → False (master too short)
-    wos ["n", "r"]     master ["nikolay", "r"]     → True
-    wos ["n", "r"]     master ["nikolay", "rumen"] → True
-    wos ["viktor", "v"] master ["viktor", "v"]     → True
-    wos ["viktor", "v"] master ["viktor", "velikov"]→ True
-    wos ["v"]          master ["viktor", "v"]      → True
+    wos ["n"]                     master ["nikolay"]            -> True
+    wos ["n"]                     master ["nikolay", "r"]       -> True
+    wos ["n", "r"]                master ["nikolay"]            -> False
+    wos ["n", "r"]                master ["nikolay", "r"]       -> True
+    wos ["denitsa", "georgieva"]  master ["denitza"]            -> True
+    wos ["viktor", "v"]           master ["viktor", "v"]        -> True
+    wos ["v"]                     master ["viktor", "v"]        -> True
     """
-    if len(master_parts) < len(wos_parts):
+    if not wos_parts or not master_parts:
         return False
 
-    for i, wt in enumerate(wos_parts):
+    compare_len = min(len(wos_parts), len(master_parts))
+
+    # Extra WoS parts beyond master length: allowed if full words, reject if initials
+    if len(wos_parts) > len(master_parts):
+        for extra_wt in wos_parts[len(master_parts):]:
+            if _is_initial(extra_wt):
+                return False
+
+    for i in range(compare_len):
+        wt = wos_parts[i]
         mt = master_parts[i]
         if _is_initial(wt):
             if not mt.startswith(wt):
                 return False
         else:
-            # WoS has a full word
             if _is_initial(mt):
-                # master has only an initial — must match first letter of WoS word
                 if mt != wt[0]:
                     return False
             else:
-                if wt != mt:
+                if wt != mt and _similarity(wt, mt) < name_fuzzy_threshold:
                     return False
     return True
 
