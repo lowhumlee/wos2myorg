@@ -699,8 +699,9 @@ with tab_review:
                             ]
                             cand_labels.append("➕ Create as NEW PERSON")
 
-                            # Pre-select the top candidate
-                            default_idx = 0
+                            # Restore previously saved choice index
+                            saved_choice = dec.get("_identity_choice", cand_labels[0])
+                            default_idx  = cand_labels.index(saved_choice) if saved_choice in cand_labels else 0
 
                             choice = st.selectbox(
                                 f"Identity for {author}",
@@ -708,21 +709,123 @@ with tab_review:
                                 index=default_idx,
                                 key=_safe_key("identity", norm),
                             )
-                            if "NEW PERSON" in choice:
-                                dec["resolved_pid"]  = first.get("suggested_pid", "")
-                                dec["resolved_name"] = author
-                                dec["match_type"]    = "new"
-                                # Clear pre-filled orgs so user assigns manually
-                                dec["org_ids"] = [""]
-                            else:
-                                idx = cand_labels.index(choice)
-                                _, chosen_person, _ = cands[idx]
-                                dec["resolved_pid"]  = chosen_person["PersonID"]
-                                dec["resolved_name"] = chosen_person["AuthorFullName"]
-                                dec["match_type"]    = "resolved"
-                                # Pre-fill org IDs from the chosen master record
-                                dec["org_ids"] = chosen_person.get("OrganizationIDs") or                                     ([chosen_person["OrganizationID"]]
-                                     if chosen_person.get("OrganizationID") else [""])
+                            dec["_identity_choice"] = choice
+
+                            # Only apply main selectbox result when no override is active
+                            if not dec.get("_override_pid"):
+                                if "NEW PERSON" in choice:
+                                    dec["resolved_pid"]  = first.get("suggested_pid", "")
+                                    dec["resolved_name"] = author
+                                    dec["match_type"]    = "new"
+                                    dec["org_ids"]       = [""]
+                                else:
+                                    idx = cand_labels.index(choice)
+                                    _, chosen_person, _ = cands[idx]
+                                    dec["resolved_pid"]  = chosen_person["PersonID"]
+                                    dec["resolved_name"] = chosen_person["AuthorFullName"]
+                                    dec["match_type"]    = "resolved"
+                                    dec["org_ids"] = chosen_person.get("OrganizationIDs") or (
+                                        [chosen_person["OrganizationID"]]
+                                        if chosen_person.get("OrganizationID") else [""]
+                                    )
+
+                            # ── Override search — find a different existing person ──
+                            ovr_active = bool(dec.get("_override_pid"))
+                            ovr_label  = (
+                                f"✏️ Override active: {dec.get('resolved_name','')} "
+                                f"[{dec.get('resolved_pid','')}] — click to change"
+                                if ovr_active else
+                                "🔍 Not the right person? Search the full list"
+                            )
+                            with st.expander(ovr_label, expanded=ovr_active):
+                                if ovr_active:
+                                    if st.button("✖ Clear override — use algorithm result",
+                                                 key=_safe_key("clear_override", norm)):
+                                        dec.pop("_override_pid",  None)
+                                        dec.pop("_override_query", None)
+                                        dec.pop("_override_choice", None)
+                                        decisions[norm] = dec
+                                        st.rerun()
+                                    st.markdown("---")
+                                override_query = st.text_input(
+                                    "Search existing researchers",
+                                    value=dec.get("_override_query", ""),
+                                    key=_safe_key("override_search", norm),
+                                    placeholder="Type a name…",
+                                )
+                                dec["_override_query"] = override_query
+
+                                if override_query:
+                                    over_hits = search_person_index(
+                                        override_query, list(st.session_state.person_index)
+                                    )
+                                    if over_hits:
+                                        NEW_PERSON_OVR = f"➕ Create as NEW PERSON  (ID will be {first.get('suggested_pid', 'auto')})"
+                                        over_opts = [NEW_PERSON_OVR] + [
+                                            f"[{hp['PersonID']}] {hp['AuthorFullName']}  ·  {int(hs*100)}%"
+                                            for hs, hp in over_hits
+                                        ]
+                                        over_map  = {
+                                            f"[{hp['PersonID']}] {hp['AuthorFullName']}  ·  {int(hs*100)}%": hp
+                                            for hs, hp in over_hits
+                                        }
+                                        # Restore saved override selection
+                                        saved_ovr   = dec.get("_override_choice", NEW_PERSON_OVR)
+                                        ovr_def_idx = over_opts.index(saved_ovr) if saved_ovr in over_opts else 0
+
+                                        over_choice = st.selectbox(
+                                            "Select override identity",
+                                            over_opts,
+                                            index=ovr_def_idx,
+                                            key=_safe_key("override_pick", norm),
+                                        )
+                                        dec["_override_choice"] = over_choice
+
+                                        if over_choice != NEW_PERSON_OVR:
+                                            ovr_person = over_map[over_choice]
+                                            dec["resolved_pid"]  = ovr_person["PersonID"]
+                                            dec["resolved_name"] = ovr_person["AuthorFullName"]
+                                            dec["match_type"]    = "resolved"
+                                            new_org_ids = ovr_person.get("OrganizationIDs") or (
+                                                [ovr_person["OrganizationID"]]
+                                                if ovr_person.get("OrganizationID") else []
+                                            )
+                                            dec["org_ids"]       = new_org_ids or [""]
+                                            dec["_override_pid"] = ovr_person["PersonID"]
+                                            # Push org labels into multiselect widget state
+                                            orgs_key = _safe_key("orgs", norm)
+                                            ovr_org_labels = [label_for_org(o) for o in new_org_ids if o]
+                                            valid_ovr_labels = [l for l in ovr_org_labels if l in org_map]
+                                            if valid_ovr_labels:
+                                                st.session_state[orgs_key] = valid_ovr_labels
+                                            approve_key = _safe_key("approve", norm)
+                                            st.session_state[approve_key] = True
+                                            dec["approved"]     = True
+                                            dec["user_decided"] = True
+                                            st.info(
+                                                f"✅ Override: **{ovr_person['AuthorFullName']}** "
+                                                f"(ID {ovr_person['PersonID']}) will be used.",
+                                            )
+                                            # Check for duplicate
+                                            ep = st.session_state.get("existing_pairs", set())
+                                            for it in items:
+                                                if (ovr_person["PersonID"], it["UT"]) in ep:
+                                                    st.warning(
+                                                        f"⚠️ **Probable duplicate** — "
+                                                        f"{ovr_person['AuthorFullName']} (ID {ovr_person['PersonID']}) "
+                                                        f"is already linked to **{it['UT']}** in MyOrg. "
+                                                        f"Will be skipped on save.",
+                                                    )
+                                                    break
+                                        else:
+                                            # NEW PERSON chosen in override
+                                            dec["resolved_pid"]  = first.get("suggested_pid", "")
+                                            dec["resolved_name"] = author
+                                            dec["match_type"]    = "new"
+                                            dec["org_ids"]       = [""]
+                                            dec.pop("_override_pid", None)
+                                    else:
+                                        st.caption("No matches found.")
                         else:
                             # ── Identity picker for new persons ──────────────
                             # Build candidate list: live search + "create new" option
