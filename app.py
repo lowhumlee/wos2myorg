@@ -284,6 +284,19 @@ def search_person_index(query: str, person_index: list, max_results: int = 6) ->
     return results[:max_results]
 
 
+def _safe_key(prefix: str, norm: str) -> str:
+    """
+    Convert a norm string (may contain spaces, commas, hyphens) into a
+    Streamlit-safe widget key.  Streamlit silently mangles keys that contain
+    characters outside [a-zA-Z0-9_] when used as session_state attributes,
+    causing checkbox/selectbox state to be lost across reruns.
+    """
+    import re
+    safe = re.sub(r"[^a-z0-9]", "_", norm.lower())
+    safe = re.sub(r"_+", "_", safe).strip("_")
+    return f"{prefix}__{safe}"
+
+
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
 tab_load, tab_review, tab_output, tab_stats, tab_help = st.tabs([
@@ -629,7 +642,14 @@ with tab_review:
                     label = f"❌  {author}  —  {len(items)} document(s)  · REJECTED"
                 elif is_approved and is_decided:
                     resolved = dec_current.get("resolved_name", author)
-                    org_ids  = [o for o in dec_current.get("org_ids", []) if o]
+                    # Read org_ids from widget state if available (more current than saved dec)
+                    org_key  = _safe_key("orgs", norm)
+                    if org_key in st.session_state:
+                        # Widget state holds list of labels; convert back to IDs
+                        widget_labels = st.session_state[org_key]
+                        org_ids = [org_map.get(lbl, lbl) for lbl in widget_labels if lbl]
+                    else:
+                        org_ids = [o for o in dec_current.get("org_ids", []) if o]
                     org_str  = ", ".join(org_ids) if org_ids else "no org"
                     label    = f"✅  {author}  →  {resolved}  [{org_str}]"
                 elif not is_decided and mt == "initial_expansion":
@@ -686,7 +706,7 @@ with tab_review:
                                 f"Identity for {author}",
                                 cand_labels,
                                 index=default_idx,
-                                key=f"identity_{norm}",
+                                key=_safe_key("identity", norm),
                             )
                             if "NEW PERSON" in choice:
                                 dec["resolved_pid"]  = first.get("suggested_pid", "")
@@ -709,7 +729,7 @@ with tab_review:
                             search_query = st.text_input(
                                 "Search existing researchers",
                                 value=dec.get("search_query", author),
-                                key=f"search_{norm}",
+                                key=_safe_key("search", norm),
                                 help="Type a name to find existing persons — then select below",
                             )
                             dec["search_query"] = search_query
@@ -759,7 +779,7 @@ with tab_review:
                                 f"Identity for {author}",
                                 options=hit_options,
                                 index=default_sel,
-                                key=f"identity_new_{norm}",
+                                key=_safe_key("identity_new", norm),
                             )
 
                             if chosen_lbl == NEW_PERSON_LABEL:
@@ -770,13 +790,27 @@ with tab_review:
                                 st.caption(f"Will be registered as a new person · ID {dec['resolved_pid']}")
                             else:
                                 chosen_person = hit_map[chosen_lbl]
+                                new_org_ids = chosen_person.get("OrganizationIDs") or (
+                                    [chosen_person["OrganizationID"]]
+                                    if chosen_person.get("OrganizationID") else []
+                                )
                                 dec["resolved_pid"]  = chosen_person["PersonID"]
                                 dec["resolved_name"] = chosen_person["AuthorFullName"]
                                 dec["match_type"]    = "resolved"
-                                dec["org_ids"] = chosen_person.get("OrganizationIDs") or (
-                                    [chosen_person["OrganizationID"]]
-                                    if chosen_person.get("OrganizationID") else [""]
-                                )
+                                dec["org_ids"]       = new_org_ids or [""]
+                                # Push the org labels into the multiselect widget state
+                                # so the org picker auto-fills without requiring a re-render
+                                orgs_key = _safe_key("orgs", norm)
+                                new_org_labels = [label_for_org(o) for o in new_org_ids if o]
+                                valid_org_labels = [l for l in new_org_labels if l in org_map]
+                                if valid_org_labels:
+                                    st.session_state[orgs_key] = valid_org_labels
+                                # Also pre-approve when resolving to existing person
+                                approve_key = _safe_key("approve", norm)
+                                if approve_key not in st.session_state:
+                                    st.session_state[approve_key] = True
+                                dec["approved"]     = True
+                                dec["user_decided"] = True
                                 # Check immediately if this is a duplicate
                                 ep = st.session_state.get("existing_pairs", set())
                                 for it in items:
@@ -786,7 +820,6 @@ with tab_review:
                                             f"{chosen_person['AuthorFullName']} (ID {chosen_person['PersonID']}) "
                                             f"is already linked to **{it['UT']}** in MyOrg. "
                                             f"If you approve this, it will be **skipped** (not re-uploaded).",
-                                            icon="🔁",
                                         )
                                         break
 
@@ -800,32 +833,44 @@ with tab_review:
                                     for oid in dec.get("org_ids", [""])
                                     if oid and label_for_org(oid) != org_labels[0]
                                 ],
-                                key=f"orgs_{norm}",
+                                key=_safe_key("orgs", norm),
                             )
                             dec["org_ids"] = [org_map[lbl] for lbl in selected_labels] or [""]
                         else:
                             sel = st.selectbox(
                                 "Assign organization",
                                 options=org_labels,
-                                key=f"org_{norm}",
+                                key=_safe_key("org", norm),
                             )
                             dec["org_ids"] = [org_map[sel]] if sel in org_map else [""]
 
                     st.markdown("---")
                     ap_col, rj_col = st.columns(2)
                     with ap_col:
-                        approved_val = st.checkbox(
-                            "✅ **Approve & include in upload**",
-                            value=dec.get("approved", mt != "new"),
-                            key=f"approve_{norm}",
-                            help="Check to include this entry in the upload-ready CSV"
-                        )
-                        if approved_val != dec.get("approved", mt != "new"):
-                            dec["user_decided"] = True
-                        dec["approved"] = approved_val
-                        # Also mark as decided once checkbox has been rendered and interacted with
-                        if f"approve_{norm}" in st.session_state:
-                            dec["user_decided"] = True
+                        # Determine correct initial value:
+                        # - if widget key already in session_state, sync from there
+                        #   (avoids Streamlit value=/session_state inversion bug)
+                        # - otherwise use dec["approved"] or default for match type
+                        approve_key = _safe_key("approve", norm)
+                        if approve_key in st.session_state:
+                            # Key exists: value= is ignored by Streamlit, but we
+                            # read it back to keep dec in sync
+                            approved_val = st.checkbox(
+                                "✅ **Approve & include in upload**",
+                                key=approve_key,
+                                help="Check to include this entry in the upload-ready CSV"
+                            )
+                        else:
+                            # First render for this item: use saved/default value
+                            init_val = dec.get("approved", dec.get("match_type", mt) != "new")
+                            approved_val = st.checkbox(
+                                "✅ **Approve & include in upload**",
+                                value=init_val,
+                                key=approve_key,
+                                help="Check to include this entry in the upload-ready CSV"
+                            )
+                        dec["approved"]      = approved_val
+                        dec["user_decided"]  = True  # rendered = user had a chance to decide
                     with rj_col:
                         if not dec.get("approved", True):
                             st.markdown(
@@ -870,8 +915,10 @@ with tab_review:
             for norm, items in needs_by_norm.items():
                 dec = decisions.get(norm)
                 item_mt = items[0].get("match_type", "new")
-                # New persons require explicit approval; fuzzy/initial default to approved
-                default_approved = item_mt != "new"
+                # Use the decision's match_type if user resolved to existing person
+                dec_mt = dec.get("match_type", item_mt) if dec else item_mt
+                # New persons require explicit approval; fuzzy/initial/resolved default approved
+                default_approved = dec_mt != "new"
                 if not dec or not dec.get("approved", default_approved):
                     for it in items:
                         rejected_rows.append({
