@@ -1,1414 +1,1009 @@
 """
-app.py — WoS MUV Affiliation Ingestion Tool · Streamlit GUI
+app.py — WoS MyOrg Affiliation Tool v2
+UT-centric review: one publication at a time, all its MUV authors resolved
+before locking and moving to the next.
 Medical University of Varna · Research Information Systems
-
-Run with:
-  streamlit run app.py
 """
 
 from __future__ import annotations
 
 import csv
 import io
-import json
-import os
-import sys
+import re
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
+from typing import Any
 
-import streamlit as st
 import pandas as pd
-
-# Make sure core.py is importable from same directory
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import streamlit as st
 
 from core import (
-    DEFAULT_CONFIG,
-    normalize_name, name_similarity,
-    build_person_index, parse_org_hierarchy, parse_wos_csv,
-    extract_muv_author_pairs, match_person, batch_process,
-    build_upload_csv, build_audit_json, build_review_excel,
-    StagingDB,
+    load_config,
+    build_person_index,
+    parse_org_hierarchy,
+    parse_wos_csv,
+    extract_muv_author_pairs,
+    batch_process,
+    build_upload_csv,
+    build_audit_json,
+    normalize_name,
+    name_similarity,
 )
 
-try:
-    import openpyxl
-    HAS_OPENPYXL = True
-except ImportError:
-    HAS_OPENPYXL = False
-
-# ─── Page & Theme Setup ───────────────────────────────────────────────────────
-
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="WoS MUV Ingestion Tool",
+    page_title="WoS → MyOrg  v2",
     page_icon="🔬",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-.muv-header {
-    background: linear-gradient(135deg, #0d2d4e 0%, #1a5276 60%, #2980b9 100%);
-    border-radius: 14px;
-    padding: 1.6rem 2.2rem 1.4rem;
-    margin-bottom: 1.6rem;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.18);
-}
-.muv-header h1 { color: #ffffff; margin: 0; font-size: 1.75rem; letter-spacing: -0.02em; }
-.muv-header .sub { color: #a8d4f5; margin: 0.35rem 0 0; font-size: 0.92rem; }
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
-.metric-grid { display: flex; gap: 1rem; margin: 1rem 0; flex-wrap: wrap; }
-.metric-card {
-    flex: 1 1 140px;
-    background: #fff;
-    border: 1px solid #d0dde8;
-    border-radius: 12px;
-    padding: 1.1rem 1.2rem;
-    text-align: center;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-}
-.metric-card .num { font-size: 2.4rem; font-weight: 800; line-height: 1; }
-.metric-card .lbl { font-size: 0.78rem; color: #6b7a8d; margin-top: 0.3rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
-.num-blue { color: #1a5276; }
-.num-green { color: #1e8449; }
-.num-orange { color: #d35400; }
-.num-yellow { color: #9a7d0a; }
+html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 
-.badge {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.03em;
+/* ── Header ── */
+.app-header {
+    background: #0f1923;
+    color: #e8f4f8;
+    padding: 1.4rem 2rem 1.2rem;
+    border-bottom: 3px solid #1a9dc8;
+    margin: -1rem -1rem 1.5rem;
+    display: flex; align-items: baseline; gap: 1rem;
 }
-.badge-new      { background: #d5f5e3; color: #1e8449; }
-.badge-exact    { background: #d6eaf8; color: #1a5276; }
-.badge-fuzzy    { background: #fef9e7; color: #9a7d0a; border: 1px solid #f9e79f; }
-.badge-initial  { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }
+.app-header h1 { font-size: 1.4rem; font-weight: 600; margin: 0; letter-spacing: .02em; color: #fff; }
+.app-header .sub { font-family: 'IBM Plex Mono', monospace; font-size: .75rem; color: #7ec8e3; }
 
-.sec-head {
-    background: #eaf2fb;
-    border-left: 5px solid #1a5276;
-    padding: 0.55rem 1rem;
-    border-radius: 0 8px 8px 0;
-    margin: 1.2rem 0 0.6rem;
-    font-weight: 700;
-    color: #1a3a5c;
-    font-size: 1rem;
-}
-
-.chip {
-    display: inline-block;
-    background: #eaf2fb;
-    border: 1px solid #aed6f1;
-    color: #1a5276;
-    padding: 3px 10px;
-    border-radius: 16px;
-    font-size: 0.8rem;
-    margin: 2px;
-}
-
-div[data-testid="stFileUploader"] {
-    border: 2px dashed #aed6f1;
-    border-radius: 10px;
-    padding: 0.4rem;
-}
-
-div.stButton > button { border-radius: 8px; font-weight: 600; }
-div.stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, #1a5276, #2980b9);
-    border: none;
-    color: white;
-}
-
-div[data-testid="stExpander"] {
-    border: 1px solid #d0dde8 !important;
-    border-radius: 10px !important;
-    margin-bottom: 0.5rem;
-}
-
-div.stDownloadButton > button {
-    border-radius: 8px;
-    font-weight: 600;
-    background: #1e8449;
-    color: white;
-    border: none;
-}
-
-.sibling-note {
-    background: #f0f4ff;
-    border: 1px solid #c5d0f0;
+/* ── UT card ── */
+.ut-card {
+    background: #0f1923;
+    border: 1px solid #1a4a6b;
+    border-left: 4px solid #1a9dc8;
     border-radius: 6px;
-    padding: 4px 10px;
-    font-size: 0.8rem;
-    color: #3a4a8a;
-    margin-bottom: 6px;
-    display: inline-block;
+    padding: 1rem 1.4rem;
+    margin-bottom: 1.2rem;
+    font-family: 'IBM Plex Mono', monospace;
+}
+.ut-card .ut-id   { font-size: 1.05rem; font-weight: 600; color: #7ec8e3; letter-spacing:.03em; }
+.ut-card .ut-meta { font-size: .78rem; color: #8aabb8; margin-top: .3rem; }
+
+/* ── Author row ── */
+.author-row {
+    border: 1px solid #e0e8ef;
+    border-radius: 6px;
+    padding: .85rem 1rem;
+    margin-bottom: .7rem;
+    background: #fafcfe;
+}
+.author-row.locked   { background: #f0faf4; border-color: #27ae60; }
+.author-row.skipped  { background: #f8f8f8; border-color: #bbb; opacity: .7; }
+.author-row.rejected { background: #fff5f5; border-color: #e74c3c; }
+
+/* ── Badge ── */
+.badge {
+    display: inline-block; padding: .15rem .55rem; border-radius: 3px;
+    font-size: .72rem; font-weight: 600; letter-spacing: .04em;
+    font-family: 'IBM Plex Mono', monospace; margin-right: .4rem;
+}
+.badge-exact    { background:#d4edda; color:#155724; }
+.badge-initial  { background:#fff3cd; color:#856404; }
+.badge-fuzzy    { background:#d1ecf1; color:#0c5460; }
+.badge-new      { background:#e8d5f5; color:#5a1f8a; }
+.badge-skip     { background:#e2e3e5; color:#383d41; }
+.badge-dup      { background:#f8d7da; color:#721c24; }
+
+/* ── Progress bar ── */
+.prog-bar-wrap { background:#e0e8ef; border-radius:4px; height:8px; margin:.5rem 0 1rem; }
+.prog-bar-fill { background: linear-gradient(90deg,#1a9dc8,#27ae60); border-radius:4px; height:8px; transition: width .3s; }
+
+/* ── Nav buttons ── */
+.stButton>button {
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-weight: 500; border-radius: 4px;
 }
 
-/* ── Decision status pills (shown in minimized expander label) ── */
-.status-done {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 12px;
-    font-size: 0.75rem;
-    font-weight: 700;
-    background: #d4edda;
-    color: #155724;
-    margin-left: 6px;
+/* ── Section heading ── */
+.sec-head {
+    font-size: .7rem; font-weight: 600; letter-spacing: .1em;
+    color: #1a9dc8; text-transform: uppercase; margin: 1.2rem 0 .5rem;
+    border-bottom: 1px solid #d0e8f0; padding-bottom: .3rem;
 }
-.status-rejected {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 12px;
-    font-size: 0.75rem;
-    font-weight: 700;
-    background: #f8d7da;
-    color: #721c24;
-    margin-left: 6px;
+
+/* ── Affil chip ── */
+.chip {
+    display:inline-block; background:#e8f4f8; color:#0c5460;
+    border-radius:3px; padding:.1rem .45rem; font-size:.72rem;
+    margin:.1rem; font-family:'IBM Plex Mono',monospace;
+    border:1px solid #b8dde8;
 }
+
+/* ── Locked UT indicator ── */
+.locked-ut {
+    display:inline-flex; align-items:center; gap:.5rem;
+    background:#f0faf4; border:1px solid #27ae60; border-radius:4px;
+    padding:.35rem .8rem; font-size:.82rem; color:#155724;
+    font-weight:500; margin-bottom:.5rem;
+}
+
+/* ── Metric grid ── */
+.metric-grid { display:flex; gap:.8rem; flex-wrap:wrap; margin:.8rem 0 1.2rem; }
+.metric-card {
+    background:#fff; border:1px solid #d0e8f0; border-radius:6px;
+    padding:.7rem 1.1rem; min-width:110px; text-align:center;
+}
+.metric-card .num { font-size:1.6rem; font-weight:700; font-family:'IBM Plex Mono',monospace; color:#0f1923; }
+.metric-card .num-blue  { color:#1a9dc8; }
+.metric-card .num-green { color:#27ae60; }
+.metric-card .num-amber { color:#e67e22; }
+.metric-card .num-red   { color:#e74c3c; }
+.metric-card .lbl { font-size:.68rem; color:#7a8fa0; text-transform:uppercase; letter-spacing:.06em; margin-top:.15rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Session State Init ───────────────────────────────────────────────────────
-
-_DEFAULTS = {
-    "cfg": DEFAULT_CONFIG.copy(),
-    "person_index": {},
-    "max_pid": 0,
-    "orgs": [],
-    "wos_records": [],
-    "muv_pairs": [],
-    "batch_result": None,
-    "decisions": {},
-    "output_rows": [],
-    "rejected_rows": [],
-    "processed": False,
-    "finalized": False,
-    "source_file": "unknown.csv",
-}
-
-for k, v in _DEFAULTS.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-
-def reset_state():
-    for k, v in _DEFAULTS.items():
-        st.session_state[k] = v if not callable(v) else v()
-
-
-# ─── Sidebar ─────────────────────────────────────────────────────────────────
-
-with st.sidebar:
-    st.markdown("### ⚙️ Configuration")
-
-    cfg = st.session_state.cfg
-    cfg["fuzzy_threshold"] = st.slider(
-        "Fuzzy match threshold", 0.5, 1.0,
-        float(cfg.get("fuzzy_threshold", 0.85)), 0.01,
-        help="Minimum name similarity to flag as possible match (0 = everything, 1 = exact only)"
-    )
-    cfg["allow_multi_org"] = st.checkbox(
-        "Allow multiple organizations per author",
-        value=bool(cfg.get("allow_multi_org", True))
-    )
-    st.caption(
-        "New PersonIDs are assigned automatically as max(existing) + 1"
-    )
-
-    st.markdown("---")
-    st.markdown("### 🔍 MUV Affiliation Patterns")
-    pat_text = st.text_area(
-        "Patterns (one per line, case-insensitive)",
-        value="\n".join(cfg.get("muv_affiliation_patterns", [])),
-        height=160,
-        help="Substrings that identify a MUV affiliation in WoS C1 field"
-    )
-    cfg["muv_affiliation_patterns"] = [p.strip() for p in pat_text.splitlines() if p.strip()]
-
-    st.markdown("---")
-    if st.button("🔄 Reset All", use_container_width=True):
-        reset_state()
-        st.rerun()
-
-    st.markdown("---")
-    st.caption("WoS MUV Ingestion Tool · v2.1")
-    st.caption("Medical University of Varna")
-
-# ─── Header ──────────────────────────────────────────────────────────────────
-
+# ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div class="muv-header">
-  <h1>🔬 WoS My Organization — Affiliation Ingestion Tool</h1>
-  <div class="sub">Medical University of Varna · Bibliometric Data Curation Workflow</div>
+<div class="app-header">
+  <h1>🔬 WoS → MyOrg</h1>
+  <span class="sub">v2 · UT-centric review · Medical University of Varna</span>
 </div>
 """, unsafe_allow_html=True)
 
-# ─── Live person search helper ───────────────────────────────────────────────
+# ── Session state defaults ────────────────────────────────────────────────────
+def _init():
+    defaults = {
+        "processed":       False,
+        "ut_order":        [],       # ordered list of UT strings to review
+        "ut_index":        0,        # current UT cursor
+        "ut_locked":       {},       # ut → True when confirmed
+        "author_decs":     {},       # (norm, ut) → decision dict
+        "output_rows":     [],
+        "rejected_rows":   [],
+        "finalized":       False,
+        "batch_result":    None,
+        "person_index":    [],
+        "existing_pairs":  set(),
+        "orgs":            [],
+        "cfg":             {},
+        "source_file":     "",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+_init()
 
-def search_person_index(query: str, person_index: list, max_results: int = 6) -> list:
-    """
-    Search the person index for names matching `query`.
-    Returns a ranked list of (score, person_dict) tuples.
-    Handles both surname-first ("Chaushev, Borislav") and
-    given-first ("Borislav Chaushev") queries.
-    """
-    from core import normalize_name, name_similarity
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _safe_key(*parts: str) -> str:
+    raw = "_".join(str(p) for p in parts)
+    safe = re.sub(r"[^a-z0-9]", "_", raw.lower())
+    return re.sub(r"_+", "_", safe).strip("_")
+
+def search_persons(query: str, person_index: list, max_results: int = 8) -> list:
     if not query or len(query) < 2:
         return []
-
     q = normalize_name(query)
-    # Also try reversing "Firstname Lastname" → "Lastname, Firstname"
     q_parts = q.split()
-    q_reversed = f"{q_parts[-1]} {' '.join(q_parts[:-1])}" if len(q_parts) > 1 else q
-
     results = []
     for p in person_index:
         name = p["NormName"]
-        # Score against both orderings
-        score = max(
-            name_similarity(q, name),
-            name_similarity(q_reversed, name),
-        )
-        # Boost if the query is a substring of the name or vice versa
-        if q in name or any(part in name for part in q.split() if len(part) > 2):
-            score = max(score, 0.5)
-        if score >= 0.3:
+        score = name_similarity(q, name)
+        if any(part in name for part in q_parts if len(part) > 2):
+            score = max(score, 0.45)
+        if score >= 0.28:
             results.append((score, p))
-
     results.sort(key=lambda x: -x[0])
     return results[:max_results]
 
+def org_label(oid: str, org_map: dict) -> str:
+    for lbl, v in org_map.items():
+        if v == oid:
+            return lbl
+    return oid
 
-def _safe_key(prefix: str, norm: str) -> str:
-    """
-    Convert a norm string (may contain spaces, commas, hyphens) into a
-    Streamlit-safe widget key.  Streamlit silently mangles keys that contain
-    characters outside [a-zA-Z0-9_] when used as session_state attributes,
-    causing checkbox/selectbox state to be lost across reruns.
-    """
-    import re
-    safe = re.sub(r"[^a-z0-9]", "_", norm.lower())
-    safe = re.sub(r"_+", "_", safe).strip("_")
-    return f"{prefix}__{safe}"
+def build_org_map(orgs: list) -> tuple[dict, list]:
+    m = {f"[{o['OrganizationID']}] {o['OrganizationName']}": o["OrganizationID"] for o in orgs}
+    labels = ["— none / skip —"] + list(m.keys())
+    return m, labels
+
+def _ut_status(ut: str) -> str:
+    """Return 'locked', 'skip' (all dupes), or 'pending'."""
+    if st.session_state.ut_locked.get(ut):
+        return "locked"
+    result = st.session_state.batch_result
+    if result is None:
+        return "pending"
+    # Check if all pairs for this UT are already_uploaded
+    au = [r for r in result["already_uploaded"] if r.get("UT") == ut]
+    nr = [r for r in result["needs_review"]     if r.get("UT") == ut]
+    cf = [r for r in result["confirmed"]         if r.get("UT") == ut]
+    if not nr and not cf:
+        return "skip"
+    return "pending"
+
+def _ut_needs_attention(ut: str) -> list:
+    """Rows for this UT that need user input (needs_review only)."""
+    if st.session_state.batch_result is None:
+        return []
+    return [r for r in st.session_state.batch_result["needs_review"] if r.get("UT") == ut]
+
+def _ut_auto_confirmed(ut: str) -> list:
+    if st.session_state.batch_result is None:
+        return []
+    return [r for r in st.session_state.batch_result["confirmed"] if r.get("UT") == ut]
+
+def _ut_already_uploaded(ut: str) -> list:
+    if st.session_state.batch_result is None:
+        return []
+    return [r for r in st.session_state.batch_result["already_uploaded"] if r.get("UT") == ut]
+
+def _all_authors_decided(ut: str) -> bool:
+    """True when every needs_review row for this UT has a decision."""
+    rows = _ut_needs_attention(ut)
+    for r in rows:
+        key = (normalize_name(r["AuthorFullName"]), ut)
+        dec = st.session_state.author_decs.get(key)
+        if dec is None or not dec.get("decided", False):
+            return False
+    return True
+
+def _get_dec(norm: str, ut: str) -> dict:
+    return st.session_state.author_decs.get((norm, ut), {})
+
+def _set_dec(norm: str, ut: str, dec: dict):
+    st.session_state.author_decs[(norm, ut)] = dec
 
 
-# ─── Tabs ─────────────────────────────────────────────────────────────────────
-
-tab_load, tab_review, tab_output, tab_stats, tab_help = st.tabs([
+# ── Tabs ──────────────────────────────────────────────────────────────────────
+tab_load, tab_review, tab_export = st.tabs([
     "📂 1 · Load Files",
-    "🔎 2 · Review & Resolve",
-    "📤 3 · Export Output",
-    "📊 4 · Statistics",
-    "❓ Help",
+    "🔍 2 · Review by Publication",
+    "⬇️ 3 · Export",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — LOAD FILES
+# TAB 1 — LOAD
 # ══════════════════════════════════════════════════════════════════════════════
-
 with tab_load:
-    st.markdown('<div class="sec-head">Upload Input Files</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-head">Upload files</div>', unsafe_allow_html=True)
 
-    col1, col2, col3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        wos_file = st.file_uploader("WoS Export CSV", type=["csv","txt"], key="wos_up",
+            help="Web of Science full-record export. Must contain AU, AF, C1, C3, UT fields.")
+    with c2:
+        res_file = st.file_uploader("ResearcherAndDocument.csv", type=["csv"], key="res_up",
+            help="Current MyOrg researcher roster.")
+    with c3:
+        org_file = st.file_uploader("OrganizationHierarchy.csv", type=["csv"], key="org_up",
+            help="Organisation hierarchy for affiliation picker.")
 
-    with col1:
-        st.markdown("**📋 WoS Export (new records)**")
-        wos_file = st.file_uploader("WoS CSV (input*.csv)", type=["csv", "txt"], key="wos_up")
-        if wos_file:
-            st.success(f"✓ {wos_file.name}")
-            st.session_state.source_file = wos_file.name
+    if wos_file and res_file and org_file:
+        with st.expander("Preview uploads", expanded=False):
+            p1, p2 = st.columns(2)
+            with p1:
+                st.caption("WoS (first 5 rows)")
+                st.dataframe(pd.read_csv(io.BytesIO(wos_file.read()), nrows=5,
+                             encoding="utf-8-sig"), use_container_width=True)
+                wos_file.seek(0)
+            with p2:
+                st.caption("ResearcherAndDocument (first 5 rows)")
+                st.dataframe(pd.read_csv(io.BytesIO(res_file.read()), nrows=5,
+                             encoding="utf-8-sig"), use_container_width=True)
+                res_file.seek(0)
 
-    with col2:
-        st.markdown("**👥 Existing Researchers**")
-        res_file = st.file_uploader("ResearcherAndDocument.csv", type=["csv"], key="res_up")
-        if res_file:
-            st.success(f"✓ {res_file.name}")
+        if st.button("⚙️  Process files", type="primary", use_container_width=True):
+            with st.spinner("Parsing and matching…"):
+                wos_content = wos_file.read().decode("utf-8-sig")
+                res_content = res_file.read().decode("utf-8-sig")
+                org_content = org_file.read().decode("utf-8-sig")
 
-    with col3:
-        st.markdown("**🏛️ Organization Hierarchy**")
-        org_file = st.file_uploader("OrganizationHierarchy.csv", type=["csv"], key="org_up")
-        if org_file:
-            st.success(f"✓ {org_file.name}")
+                cfg = load_config("config.json")
+                person_index, max_pid, existing_pairs = build_person_index(res_content)
+                orgs  = parse_org_hierarchy(org_content)
+                records   = parse_wos_csv(wos_content)
+                muv_pairs = extract_muv_author_pairs(records, cfg)
 
-    st.markdown("---")
+                result = batch_process(
+                    muv_pairs, person_index, orgs, cfg,
+                    start_pid=max_pid + 1,
+                    researcher_csv_content=res_content,
+                    existing_pairs=existing_pairs,
+                )
 
-    if res_file:
-        res_file.seek(0)
-        df_preview = list(csv.DictReader(io.StringIO(res_file.read().decode("utf-8-sig"))))
-        res_file.seek(0)
-        with st.expander(f"Preview: Researchers ({len(df_preview)} rows)", expanded=False):
-            st.dataframe(pd.DataFrame(df_preview).head(15), use_container_width=True)
+                # Build UT order: UTs with needs_review or confirmed first (need attention),
+                # then all-duplicate UTs last (auto-skipped)
+                all_uts_in_result = sorted({
+                    r.get("UT", "") for r in
+                    result["confirmed"] + result["needs_review"] + result["already_uploaded"]
+                    if r.get("UT")
+                })
 
-    if org_file:
-        org_file.seek(0)
-        df_org_preview = list(csv.DictReader(io.StringIO(org_file.read().decode("utf-8-sig"))))
-        org_file.seek(0)
-        with st.expander(f"Preview: Organizations ({len(df_org_preview)} orgs)", expanded=False):
-            st.dataframe(pd.DataFrame(df_org_preview), use_container_width=True)
+                def ut_sort_key(ut):
+                    has_review = any(r["UT"] == ut for r in result["needs_review"])
+                    has_conf   = any(r["UT"] == ut for r in result["confirmed"])
+                    return (0 if (has_review or has_conf) else 1, ut)
 
-    if wos_file:
-        wos_file.seek(0)
-        wos_preview_raw = wos_file.read().decode("utf-8-sig")
-        wos_file.seek(0)
-        wos_preview = list(csv.DictReader(io.StringIO(wos_preview_raw)))
-        with st.expander(f"Preview: WoS Records ({len(wos_preview)} records)", expanded=False):
-            if wos_preview:
-                df_wos_prev = pd.DataFrame(wos_preview)
-                df_wos_prev.columns = [
-                    c.strip() if c is not None else "__EMPTY__"
-                    for c in df_wos_prev.columns
-                ]
-                df_wos_prev = df_wos_prev[[c for c in df_wos_prev.columns if c != "__EMPTY__"]]
-                preferred = [c for c in ["UT", "AF"] if c in df_wos_prev.columns]
-                st.caption(f"Detected columns: {list(df_wos_prev.columns)}")
-                if preferred:
-                    st.dataframe(df_wos_prev[preferred].head(10), use_container_width=True)
-                else:
-                    st.dataframe(df_wos_prev.head(10), use_container_width=True)
-            else:
-                st.warning("No rows found in WoS file.")
+                ut_order = sorted(all_uts_in_result, key=ut_sort_key)
 
-    st.markdown("---")
+                st.session_state.update({
+                    "processed":      True,
+                    "batch_result":   result,
+                    "person_index":   person_index,
+                    "existing_pairs": existing_pairs,
+                    "orgs":           orgs,
+                    "cfg":            cfg,
+                    "ut_order":       ut_order,
+                    "ut_index":       0,
+                    "ut_locked":      {},
+                    "author_decs":    {},
+                    "output_rows":    [],
+                    "rejected_rows":  [],
+                    "finalized":      False,
+                    "source_file":    wos_file.name,
+                    "max_pid":        max_pid,
+                })
+            st.success(f"✅ Processed {len(records)} records · {len(muv_pairs)} MUV pairs · "
+                       f"{len(ut_order)} UTs to review.")
+            st.info("➡️ Go to **Tab 2** to review by publication.")
+    else:
+        st.info("Upload all three files to begin.")
 
-    proc_btn = st.button(
-        "🚀  Detect MUV Authors",
-        type="primary",
-        disabled=not (wos_file and res_file and org_file),
-        use_container_width=True,
-    )
+    if st.session_state.processed:
+        result = st.session_state.batch_result
+        au_all = result["already_uploaded"]
+        n_skip = len({r["UT"] for r in au_all
+                      if not any(r2["UT"] == r["UT"] for r2 in result["needs_review"] + result["confirmed"])})
+        n_dup_prob = len([r for r in au_all if r.get("match_type") == "probable_duplicate"])
 
-    if proc_btn:
-        cfg = st.session_state.cfg
-
-        with st.spinner("Parsing files and detecting MUV-affiliated authors…"):
-            # Read all file contents once
-            res_file.seek(0)
-            res_content = res_file.read().decode("utf-8-sig")
-            org_file.seek(0)
-            org_content = org_file.read().decode("utf-8-sig")
-            wos_file.seek(0)
-            wos_content = wos_file.read().decode("utf-8-sig")
-
-            person_index, max_pid, existing_pairs = build_person_index(res_content)
-            orgs                  = parse_org_hierarchy(org_content)
-            records               = parse_wos_csv(wos_content)
-            muv_pairs             = extract_muv_author_pairs(records, cfg)
-
-            # Always start above the highest existing PersonID in the master file
-            # so new IDs never clash with previously uploaded records
-            start_pid = max_pid + 1
-
-            batch_result = batch_process(
-                muv_pairs, person_index, orgs, cfg, start_pid,
-                researcher_csv_content=res_content,
-                existing_pairs=existing_pairs,
-            )
-
-            # Build decisions dict for interactive review
-            decisions_by_norm: dict[str, dict] = {}
-            for item in batch_result["needs_review"]:
-                norm = item["norm"]
-                if norm not in decisions_by_norm:
-                    # Use org IDs from the matched master record as the pre-filled default
-                    default_org_ids = item.get("suggested_org_ids") or                                        ([item["OrganizationID"]] if item.get("OrganizationID") else [""])
-                    # New persons start un-approved (require explicit sign-off).
-                    # Fuzzy / initial_expansion matches start pre-approved
-                    # (user just needs to confirm or reject the suggested identity).
-                    mt_item = item.get("match_type", "new")
-                    auto_approve = mt_item in ("initial_expansion", "fuzzy", "resolved")
-                    decisions_by_norm[norm] = {
-                        **item,
-                        "org_ids":       default_org_ids,
-                        "resolved_pid":  item.get("suggested_pid", ""),
-                        "resolved_name": item.get("suggested_name",
-                                                   item.get("AuthorFullName", "")),
-                        "approved": auto_approve,
-                    }
-
-            st.session_state.person_index  = person_index
-            st.session_state.max_pid       = max_pid
-            st.session_state.orgs          = orgs
-            st.session_state.wos_records   = records
-            st.session_state.muv_pairs     = muv_pairs
-            st.session_state.batch_result  = batch_result
-            st.session_state.decisions     = decisions_by_norm
-            st.session_state.existing_pairs = existing_pairs
-            st.session_state.processed     = True
-            st.session_state.finalized     = False
-            st.session_state.output_rows   = []
-
-        confirmed = batch_result["confirmed"]
-        review    = batch_result["needs_review"]
-        new_p     = batch_result["new_persons"]
-
-        already_up_all    = batch_result.get("already_uploaded", [])
-        n_exact           = len([r for r in confirmed   if r.get("match_type") == "exact"])
-        n_new             = len([r for r in review      if r.get("match_type") == "new"])
-        n_fuzzy           = len([r for r in review      if r.get("match_type") == "fuzzy"])
-        n_initial         = len([r for r in review      if r.get("match_type") == "initial_expansion"])
-        n_uploaded_exact  = len([r for r in already_up_all if r.get("match_type") != "probable_duplicate"])
-        n_prob_dup        = len([r for r in already_up_all if r.get("match_type") == "probable_duplicate"])
-        n_uploaded        = len(already_up_all)
-
+        st.markdown('<div class="sec-head">Processing summary</div>', unsafe_allow_html=True)
         st.markdown(f"""
 <div class="metric-grid">
-  <div class="metric-card"><div class="num num-blue">{len(muv_pairs)}</div><div class="lbl">MUV Pairs Found</div></div>
-  <div class="metric-card"><div class="num num-blue">{n_exact}</div><div class="lbl">Auto-Confirmed (exact)</div></div>
-  <div class="metric-card"><div class="num num-green">{len(new_p)}</div><div class="lbl">New Persons Staged</div></div>
-  <div class="metric-card"><div class="num num-yellow">{n_initial}</div><div class="lbl">Initial-Expansion Matches</div></div>
-  <div class="metric-card"><div class="num num-yellow">{n_fuzzy}</div><div class="lbl">Fuzzy / Ambiguous</div></div>
-  <div class="metric-card"><div class="num num-orange">{len(review)}</div><div class="lbl">Needs Review</div></div>
-  <div class="metric-card"><div class="num" style="color:#888">{n_uploaded_exact}</div><div class="lbl">Already in MyOrg</div></div>
-  <div class="metric-card"><div class="num" style="color:#e67e22">{n_prob_dup}</div><div class="lbl">Probable Duplicates</div></div>
+  <div class="metric-card"><div class="num num-blue">{len(st.session_state.ut_order)}</div><div class="lbl">UTs to review</div></div>
+  <div class="metric-card"><div class="num num-green">{len(result['confirmed'])}</div><div class="lbl">Auto-confirmed</div></div>
+  <div class="metric-card"><div class="num num-amber">{len(result['needs_review'])}</div><div class="lbl">Needs decision</div></div>
+  <div class="metric-card"><div class="num">{len(result['already_uploaded'])}</div><div class="lbl">Already in MyOrg</div></div>
+  <div class="metric-card"><div class="num num-red">{n_dup_prob}</div><div class="lbl">Prob. duplicates</div></div>
+  <div class="metric-card"><div class="num">{n_skip}</div><div class="lbl">All-dup UTs (auto-skip)</div></div>
 </div>
 """, unsafe_allow_html=True)
-        if n_uploaded_exact:
-            st.info(f"ℹ️ **{n_uploaded_exact} pair(s) skipped** — already present in ResearcherAndDocument.csv "
-                    f"and do not need re-uploading.")
-        if n_prob_dup:
-            st.warning(
-                f"⚠️ **{n_prob_dup} probable duplicate(s)** — high-confidence name matches whose "
-                f"(PersonID, UT) combination already exists in MyOrg. "
-                f"These have been skipped automatically. Review them in the **Statistics tab**."
-            )
-
-        if len(review) > 0:
-            st.info(f"➡️ **{len(review)} entries need your decision.** Go to Tab 2 to review.")
-        else:
-            st.success("✅ All authors matched automatically. Go to Tab 3 to export.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — REVIEW & RESOLVE
+# TAB 2 — UT-CENTRIC REVIEW
 # ══════════════════════════════════════════════════════════════════════════════
-
 with tab_review:
     if not st.session_state.processed:
-        st.info("⬅️ Please load and process data in **Tab 1** first.")
-    else:
-        batch_result = st.session_state.batch_result
-        decisions    = st.session_state.decisions
-        orgs         = st.session_state.orgs
-        cfg          = st.session_state.cfg
+        st.info("⬅️ Load and process files in Tab 1 first.")
+        st.stop()
 
-        confirmed_auto = batch_result["confirmed"]
-        needs_review   = batch_result["needs_review"]
+    result       = st.session_state.batch_result
+    person_index = st.session_state.person_index
+    orgs         = st.session_state.orgs
+    cfg          = st.session_state.cfg
+    ut_order     = st.session_state.ut_order
+    org_map, org_labels = build_org_map(orgs)
 
-        # ── Filters ──────────────────────────────────────────────────────────
-        fcol1, fcol2, fcol3 = st.columns([2, 2, 1])
-        with fcol1:
-            ftype = st.selectbox("Filter", [
-                "Pending decisions only",
-                "All needing review",
-                "New persons only",
-                "Fuzzy matches only",
-                "Initial-expansion matches only",
-                "Approved",
-                "Rejected",
-            ])
-        with fcol2:
-            fsearch = st.text_input("Search author name", "")
-        with fcol3:
-            st.markdown("<br>", unsafe_allow_html=True)
-            show_exact = st.checkbox("Show auto-confirmed", value=False)
+    if not ut_order:
+        st.success("Nothing to review.")
+        st.stop()
 
-        # ── Org dropdown helpers ──────────────────────────────────────────────
-        org_map    = {f"[{o['OrganizationID']}] {o['OrganizationName']}": o["OrganizationID"]
-                      for o in orgs}
-        org_labels = ["— none / skip —"] + list(org_map.keys())
+    # ── Progress bar ─────────────────────────────────────────────────────────
+    def _ut_is_done(ut: str) -> bool:
+        """True when nothing more is needed for this UT."""
+        if st.session_state.ut_locked.get(ut):
+            return True
+        if _ut_status(ut) == "skip":
+            return True
+        # UTs with ONLY auto-confirmed rows (no needs_review) need no user action
+        if not _ut_needs_attention(ut):
+            return True
+        return False
 
-        def label_for_org(oid: str) -> str:
-            for lbl, v in org_map.items():
-                if v == oid:
-                    return lbl
-            return org_labels[0]
+    n_done = sum(1 for ut in ut_order if _ut_is_done(ut))
+    n_need = sum(1 for ut in ut_order if _ut_needs_attention(ut))
+    pct = int(100 * n_done / len(ut_order)) if ut_order else 100
 
-        # ── Auto-confirmed section ────────────────────────────────────────────
-        if show_exact and confirmed_auto:
-            st.markdown('<div class="sec-head">✅ Auto-Confirmed (Exact Matches)</div>',
-                        unsafe_allow_html=True)
-            df_conf = pd.DataFrame([{
-                "PersonID": r["PersonID"],
-                "Name": r["AuthorFullName"],
-                "UT": r["UT"],
-                "OrgID": r["OrganizationID"],
-            } for r in confirmed_auto])
-            st.dataframe(df_conf, use_container_width=True, height=200)
+    st.markdown(f"""
+<div style="display:flex;justify-content:space-between;font-size:.8rem;color:#5a7080;">
+  <span>Progress</span>
+  <span><b>{n_done}</b> / {len(ut_order)} done &nbsp;·&nbsp; <b>{n_need}</b> need decisions</span>
+</div>
+<div class="prog-bar-wrap"><div class="prog-bar-fill" style="width:{pct}%"></div></div>
+""", unsafe_allow_html=True)
 
-        # ── Needs-review section ──────────────────────────────────────────────
-        st.markdown(
-            f'<div class="sec-head">🔍 Needs Human Decision ({len(needs_review)} entries)</div>',
-            unsafe_allow_html=True,
+    # ── UT navigation ─────────────────────────────────────────────────────────
+    idx = st.session_state.ut_index
+    idx = max(0, min(idx, len(ut_order) - 1))
+
+    nav_l, nav_c, nav_r = st.columns([1, 4, 1])
+    with nav_l:
+        if st.button("◀ Prev", use_container_width=True, disabled=(idx == 0)):
+            st.session_state.ut_index = max(0, idx - 1)
+            st.rerun()
+    with nav_r:
+        if st.button("Next ▶", use_container_width=True, disabled=(idx >= len(ut_order) - 1)):
+            st.session_state.ut_index = min(len(ut_order) - 1, idx + 1)
+            st.rerun()
+    with nav_c:
+        # Jump-to selectbox — NO persistent key so label changes don't
+        # cause mismatches when a UT is locked/unlocked mid-session.
+        ut_display = [
+            f"{'✅' if _ut_is_done(u) else '⏳'}  {u}"
+            for u in ut_order
+        ]
+        jump = st.selectbox(
+            "Jump to publication",
+            ut_display,
+            index=idx,
+            label_visibility="collapsed",
         )
+        jumped_idx = ut_display.index(jump)
+        if jumped_idx != idx:
+            st.session_state.ut_index = jumped_idx
+            st.rerun()
 
-        # Group by SiblingGroup first, then by norm within each group
-        # so variants of the same author appear adjacent in the UI
-        by_norm: dict[str, list] = defaultdict(list)
-        for item in needs_review:
-            norm = item["norm"]
-            mt   = item["match_type"]
-            if ftype == "New persons only"                 and mt != "new":               continue
-            if ftype == "Fuzzy matches only"               and mt != "fuzzy":             continue
-            if ftype == "Initial-expansion matches only"   and mt != "initial_expansion": continue
-            if fsearch and fsearch.lower() not in item["AuthorFullName"].lower():         continue
-            by_norm[norm].append(item)
+    ut = ut_order[idx]
+    status = _ut_status(ut)
 
-        if not by_norm:
-            st.success("✅ No entries match the current filter.")
-        else:
-            # Sort norms by SiblingGroup so siblings appear together
-            def sort_key(norm_items):
-                return norm_items[1][0].get("SiblingGroup", norm_items[1][0]["AuthorFullName"])
+    # ── UT header card ────────────────────────────────────────────────────────
+    auto_rows  = _ut_auto_confirmed(ut)
+    rev_rows   = _ut_needs_attention(ut)
+    dup_rows   = _ut_already_uploaded(ut)
 
-            sorted_items = sorted(by_norm.items(), key=sort_key)
+    _card_badge = ""
+    if status == "locked":
+        _card_badge = "<span style='color:#27ae60;font-weight:600;margin-left:.8rem;'>✅ LOCKED</span>"
+    elif status == "skip":
+        _card_badge = "<span style='color:#888;margin-left:.8rem;'>⏭ all duplicates — auto-skipped</span>"
+    elif not rev_rows:
+        _card_badge = "<span style='color:#27ae60;margin-left:.8rem;'>✅ auto-done (no decisions needed)</span>"
 
-            # Progress summary — only count items where user has explicitly decided
-            total_items   = len(sorted_items)
-            decided_items = sum(
-                1 for norm, _ in sorted_items
-                if decisions.get(norm, {}).get("user_decided", False)
-            )
-            approved_items  = sum(
-                1 for norm, _ in sorted_items
-                if decisions.get(norm, {}).get("user_decided", False)
-                and decisions.get(norm, {}).get("approved", True)
-            )
-            rejected_items  = decided_items - approved_items
-            pending_items   = total_items - decided_items
+    st.markdown(f"""
+<div class="ut-card">
+  <div class="ut-id">{ut}</div>
+  <div class="ut-meta">
+    <b>{len(auto_rows)}</b> auto-confirmed &nbsp;·&nbsp;
+    <b>{len(rev_rows)}</b> need decision &nbsp;·&nbsp;
+    <b>{len(dup_rows)}</b> already in MyOrg
+    {_card_badge}
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-            st.markdown(
-                f'<div style="margin:0.5rem 0 1rem;font-size:0.88rem;color:#555;">'
-                f'<b>{total_items}</b> entries &nbsp;·&nbsp; '
-                f'<span style="color:#1e8449"><b>{approved_items}</b> approved</span> &nbsp;·&nbsp; '
-                f'<span style="color:#c0392b"><b>{rejected_items}</b> rejected</span> &nbsp;·&nbsp; '
-                f'<span style="color:#d35400"><b>{pending_items}</b> pending</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+    # ── Already-uploaded rows (collapsed summary) ─────────────────────────────
+    if dup_rows:
+        with st.expander(f"⏭  {len(dup_rows)} already in MyOrg (skipped)", expanded=False):
+            for r in dup_rows:
+                mt = r.get("match_type", "")
+                badge = "badge-dup" if mt == "probable_duplicate" else "badge-skip"
+                label = "PROB. DUP" if mt == "probable_duplicate" else "ALREADY IN"
+                score = f" ({r['match_score']:.2f})" if mt == "probable_duplicate" else ""
+                st.markdown(
+                    f'<span class="badge {badge}">{label}{score}</span> '
+                    f'<b>{r.get("author_full", r.get("AuthorFullName",""))}</b>'
+                    f' → {r.get("AuthorFullName","")} [{r.get("PersonID","")}]'
+                    f' <span style="font-size:.75rem;color:#888;">{r.get("Reason","")}</span>',
+                    unsafe_allow_html=True,
+                )
 
-            prev_sibling_group = None
+    # ── Auto-confirmed rows ───────────────────────────────────────────────────
+    if auto_rows:
+        with st.expander(f"✅  {len(auto_rows)} auto-confirmed (exact match)", expanded=False):
+            for r in auto_rows:
+                st.markdown(
+                    f'<span class="badge badge-exact">EXACT</span> '
+                    f'<b>{r.get("author_full", r.get("AuthorFullName",""))}</b>'
+                    f' → {r.get("AuthorFullName","")} [{r.get("PersonID","")}]'
+                    f' <span class="chip">{r.get("OrganizationID","")}</span>',
+                    unsafe_allow_html=True,
+                )
 
-            for norm, items in sorted_items:
-                first  = items[0]
-                mt     = first["match_type"]
-                author = first["AuthorFullName"]
-                sibling_group = first.get("SiblingGroup", author)
+    # ── Rows needing decision ─────────────────────────────────────────────────
+    if status == "locked":
+        st.markdown('<div class="locked-ut">🔒 Publication confirmed — all authors resolved</div>',
+                    unsafe_allow_html=True)
 
-                # ── Determine current decision status ─────────────────────────
-                dec_current  = decisions.get(norm)
-                # user_decided = True only after the user has explicitly ticked
-                # the approve/reject checkbox (not just from pre-population at load time)
-                is_decided   = dec_current is not None and dec_current.get("user_decided", False)
-                is_approved  = is_decided and dec_current.get("approved", True)
-                is_rejected  = is_decided and not dec_current.get("approved", True)
-
-                # Apply filter
-                if ftype == "Pending decisions only"  and is_decided:   continue
-                if ftype == "Approved"                and not is_approved: continue
-                if ftype == "Rejected"                and not is_rejected: continue
-
-                # ── Sibling group divider ─────────────────────────────────────
-                if sibling_group != prev_sibling_group:
-                    prev_sibling_group = sibling_group
-                    sibling_norms = [
-                        n for n, its in sorted_items
-                        if its[0].get("SiblingGroup", its[0]["AuthorFullName"]) == sibling_group
-                    ]
-                    if len(sibling_norms) > 1:
-                        sibling_names = [by_norm[n][0]["AuthorFullName"]
-                                         for n in sibling_norms if n in by_norm]
+        # Show a summary of every decision made for this UT
+        if rev_rows:
+            with st.expander(f"🗒 {len(rev_rows)} resolved author(s) — click to review", expanded=False):
+                for r in rev_rows:
+                    raw_a = r.get("AuthorFullName", r.get("author_full", ""))
+                    norm_r = normalize_name(raw_a)
+                    dec_r  = st.session_state.author_decs.get((norm_r, ut), {})
+                    action = dec_r.get("action", "approve")
+                    mt_r   = dec_r.get("match_type", r.get("match_type", "new"))
+                    badge_map_r = {
+                        "initial_expansion": ("badge-initial", "INITIAL"),
+                        "fuzzy":             ("badge-fuzzy",   "FUZZY"),
+                        "new":               ("badge-new",     "NEW"),
+                        "resolved":          ("badge-exact",   "RESOLVED"),
+                    }
+                    bcls_r, blbl_r = badge_map_r.get(mt_r, ("badge-new", mt_r.upper()))
+                    if action == "reject":
                         st.markdown(
-                            f'<div class="sibling-note">🔗 Sibling group: '
-                            f'{" · ".join(sibling_names)}</div>',
+                            f'<span class="badge badge-dup">REJECTED</span> '                            f'<b>{raw_a}</b>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        org_ids_r = [o for o in dec_r.get("org_ids", []) if o]
+                        org_str_r = " ".join(f'<span class="chip">{o}</span>' for o in org_ids_r) or "—"
+                        st.markdown(
+                            f'<span class="badge {bcls_r}">{blbl_r}</span> '                            f'<b>{raw_a}</b> → '                            f'{dec_r.get("resolved_name", raw_a)} '                            f'[{dec_r.get("resolved_pid", "")}] '                            f'{org_str_r}',
                             unsafe_allow_html=True,
                         )
 
-                # ── Match type badge ──────────────────────────────────────────
-                badge_html = {
-                    "new":                '<span class="badge badge-new">🆕 NEW PERSON</span>',
-                    "fuzzy":              '<span class="badge badge-fuzzy">⚠ AMBIGUOUS MATCH</span>',
-                    "initial_expansion":  '<span class="badge badge-initial">🔤 INITIAL MATCH — please confirm</span>',
-                }.get(mt, "")
+        # Unlock must stay on this UT — do NOT advance index
+        if st.button("🔓 Unlock to re-edit", key=f"unlock_{ut}"):
+            st.session_state.ut_locked[ut] = False
+            # Stay on this UT — explicitly write back the current index
+            st.session_state.ut_index = idx
+            st.rerun()
 
-                uts_str = ", ".join(i["UT"] for i in items)
+    elif status == "skip":
+        st.success("All authors for this publication are already in MyOrg — nothing to do.")
 
-                # ── Build expander label with status suffix ───────────────────
-                if is_rejected:
-                    label = f"❌  {author}  —  {len(items)} document(s)  · REJECTED"
-                elif is_approved and is_decided:
-                    resolved = dec_current.get("resolved_name", author)
-                    # Read org_ids from widget state if available (more current than saved dec)
-                    org_key  = _safe_key("orgs", norm)
-                    if org_key in st.session_state:
-                        # Widget state holds list of labels; convert back to IDs
-                        widget_labels = st.session_state[org_key]
-                        org_ids = [org_map.get(lbl, lbl) for lbl in widget_labels if lbl]
-                    else:
-                        org_ids = [o for o in dec_current.get("org_ids", []) if o]
-                    org_str  = ", ".join(org_ids) if org_ids else "no org"
-                    label    = f"✅  {author}  →  {resolved}  [{org_str}]"
-                elif not is_decided and mt == "initial_expansion":
-                    label    = f"🔤  {author}  —  confirm match  ({len(items)} doc)"
-                elif not is_decided and mt in ("fuzzy",):
-                    label    = f"⚠  {author}  —  review needed  ({len(items)} doc)"
-                elif not is_decided and mt == "new":
-                    label    = f"🆕  {author}  —  new person, needs org  ({len(items)} doc)"
-                else:
-                    label    = f"⏳  {author}  —  {len(items)} document(s)"
+    else:
+        # ── Author decision cards ──────────────────────────────────────────────
+        if rev_rows:
+            st.markdown('<div class="sec-head">Authors needing a decision</div>',
+                        unsafe_allow_html=True)
 
-                # Expand when not yet decided by user
-                should_expand = not is_decided
+        all_decided = True  # track whether we can enable Lock button
 
-                with st.expander(label, expanded=should_expand):
-                    st.markdown(badge_html, unsafe_allow_html=True)
+        for r in rev_rows:
+            raw_author = r.get("AuthorFullName", r.get("author_full", ""))
+            norm       = normalize_name(raw_author)
+            mt         = r.get("match_type", "new")
+            dec        = _get_dec(norm, ut)
 
-                    # MUV affiliation chips
-                    all_muv   = []
-                    for it in items:
-                        all_muv.extend(it["muv_affils"])
-                    unique_muv = list(dict.fromkeys(all_muv))
-                    chips_html = " ".join(f'<span class="chip">{a}</span>' for a in unique_muv[:4])
-                    st.markdown(f"<small><b>MUV affiliations:</b> {chips_html}</small>",
-                                unsafe_allow_html=True)
-                    st.markdown(f"<small><b>Documents:</b> {uts_str}</small>",
-                                unsafe_allow_html=True)
+            if not dec:
+                dec = {
+                    "decided":       False,
+                    "action":        "approve",   # approve | reject
+                    "resolved_pid":  r.get("suggested_pid", ""),
+                    "resolved_name": r.get("suggested_name", raw_author),
+                    "org_ids":       r.get("suggested_org_ids") or [""],
+                    "match_type":    mt,
+                    "_search":       "",
+                    "_search_ovr":   "",
+                }
+                _set_dec(norm, ut, dec)
 
-                    # ── Identity decision ─────────────────────────────────────
-                    dec = decisions.get(norm, {
-                        "resolved_pid":  first.get("suggested_pid", ""),
-                        "resolved_name": first.get("AuthorFullName", ""),
-                        "org_ids":       [""],
-                        "approved":      mt != "new",
-                        "user_decided":  False,
-                    })
+            decided = dec.get("decided", False)
+            if not decided:
+                all_decided = False
 
-                    id_col1, id_col2 = st.columns(2)
+            # Badge
+            badge_map = {
+                "initial_expansion": ("badge-initial", "INITIAL"),
+                "fuzzy":             ("badge-fuzzy",   "FUZZY"),
+                "new":               ("badge-new",     "NEW"),
+            }
+            bcls, blbl = badge_map.get(mt, ("badge-new", mt.upper()))
 
-                    with id_col1:
-                        # Both fuzzy AND initial_expansion show a candidate picker
-                        if mt in ("fuzzy", "initial_expansion") and first.get("candidates"):
-                            cands = first["candidates"]
-                            cand_labels = [
-                                f"[{p['PersonID']}] {p['AuthorFullName']} ({s:.2f})"
-                                for _, p, s in cands
-                            ]
-                            cand_labels.append("➕ Create as NEW PERSON")
-
-                            # Restore previously saved choice index
-                            saved_choice = dec.get("_identity_choice", cand_labels[0])
-                            default_idx  = cand_labels.index(saved_choice) if saved_choice in cand_labels else 0
-
-                            choice = st.selectbox(
-                                f"Identity for {author}",
-                                cand_labels,
-                                index=default_idx,
-                                key=_safe_key("identity", norm),
-                            )
-                            dec["_identity_choice"] = choice
-
-                            # Only apply main selectbox result when no override is active
-                            if not dec.get("_override_pid"):
-                                if "NEW PERSON" in choice:
-                                    dec["resolved_pid"]  = first.get("suggested_pid", "")
-                                    dec["resolved_name"] = author
-                                    dec["match_type"]    = "new"
-                                    dec["org_ids"]       = [""]
-                                else:
-                                    idx = cand_labels.index(choice)
-                                    _, chosen_person, _ = cands[idx]
-                                    dec["resolved_pid"]  = chosen_person["PersonID"]
-                                    dec["resolved_name"] = chosen_person["AuthorFullName"]
-                                    dec["match_type"]    = "resolved"
-                                    dec["org_ids"] = chosen_person.get("OrganizationIDs") or (
-                                        [chosen_person["OrganizationID"]]
-                                        if chosen_person.get("OrganizationID") else [""]
-                                    )
-
-                            # ── Override search — find a different existing person ──
-                            ovr_active = bool(dec.get("_override_pid"))
-                            ovr_label  = (
-                                f"✏️ Override active: {dec.get('resolved_name','')} "
-                                f"[{dec.get('resolved_pid','')}] — click to change"
-                                if ovr_active else
-                                "🔍 Not the right person? Search the full list"
-                            )
-                            with st.expander(ovr_label, expanded=ovr_active):
-                                if ovr_active:
-                                    if st.button("✖ Clear override — use algorithm result",
-                                                 key=_safe_key("clear_override", norm)):
-                                        dec.pop("_override_pid",  None)
-                                        dec.pop("_override_query", None)
-                                        dec.pop("_override_choice", None)
-                                        decisions[norm] = dec
-                                        st.rerun()
-                                    st.markdown("---")
-                                override_query = st.text_input(
-                                    "Search existing researchers",
-                                    value=dec.get("_override_query", ""),
-                                    key=_safe_key("override_search", norm),
-                                    placeholder="Type a name…",
-                                )
-                                dec["_override_query"] = override_query
-
-                                if override_query:
-                                    over_hits = search_person_index(
-                                        override_query, list(st.session_state.person_index)
-                                    )
-                                    if over_hits:
-                                        NEW_PERSON_OVR = f"➕ Create as NEW PERSON  (ID will be {first.get('suggested_pid', 'auto')})"
-                                        over_opts = [NEW_PERSON_OVR] + [
-                                            f"[{hp['PersonID']}] {hp['AuthorFullName']}  ·  {int(hs*100)}%"
-                                            for hs, hp in over_hits
-                                        ]
-                                        over_map  = {
-                                            f"[{hp['PersonID']}] {hp['AuthorFullName']}  ·  {int(hs*100)}%": hp
-                                            for hs, hp in over_hits
-                                        }
-                                        # Restore saved override selection
-                                        saved_ovr   = dec.get("_override_choice", NEW_PERSON_OVR)
-                                        ovr_def_idx = over_opts.index(saved_ovr) if saved_ovr in over_opts else 0
-
-                                        over_choice = st.selectbox(
-                                            "Select override identity",
-                                            over_opts,
-                                            index=ovr_def_idx,
-                                            key=_safe_key("override_pick", norm),
-                                        )
-                                        dec["_override_choice"] = over_choice
-
-                                        if over_choice != NEW_PERSON_OVR:
-                                            ovr_person = over_map[over_choice]
-                                            dec["resolved_pid"]  = ovr_person["PersonID"]
-                                            dec["resolved_name"] = ovr_person["AuthorFullName"]
-                                            dec["match_type"]    = "resolved"
-                                            new_org_ids = ovr_person.get("OrganizationIDs") or (
-                                                [ovr_person["OrganizationID"]]
-                                                if ovr_person.get("OrganizationID") else []
-                                            )
-                                            dec["org_ids"]       = new_org_ids or [""]
-                                            dec["_override_pid"] = ovr_person["PersonID"]
-                                            # Push org labels into multiselect widget state
-                                            orgs_key = _safe_key("orgs", norm)
-                                            ovr_org_labels = [label_for_org(o) for o in new_org_ids if o]
-                                            valid_ovr_labels = [l for l in ovr_org_labels if l in org_map]
-                                            if valid_ovr_labels:
-                                                st.session_state[orgs_key] = valid_ovr_labels
-                                            approve_key = _safe_key("approve", norm)
-                                            st.session_state[approve_key] = True
-                                            dec["approved"]     = True
-                                            dec["user_decided"] = True
-                                            st.info(
-                                                f"✅ Override: **{ovr_person['AuthorFullName']}** "
-                                                f"(ID {ovr_person['PersonID']}) will be used.",
-                                            )
-                                            # Check for duplicate
-                                            ep = st.session_state.get("existing_pairs", set())
-                                            for it in items:
-                                                if (ovr_person["PersonID"], it["UT"]) in ep:
-                                                    st.warning(
-                                                        f"⚠️ **Probable duplicate** — "
-                                                        f"{ovr_person['AuthorFullName']} (ID {ovr_person['PersonID']}) "
-                                                        f"is already linked to **{it['UT']}** in MyOrg. "
-                                                        f"Will be skipped on save.",
-                                                    )
-                                                    break
-                                        else:
-                                            # NEW PERSON chosen in override
-                                            dec["resolved_pid"]  = first.get("suggested_pid", "")
-                                            dec["resolved_name"] = author
-                                            dec["match_type"]    = "new"
-                                            dec["org_ids"]       = [""]
-                                            dec.pop("_override_pid", None)
-                                    else:
-                                        st.caption("No matches found.")
-                        else:
-                            # ── Identity picker for new persons ──────────────
-                            # Build candidate list: live search + "create new" option
-                            search_query = st.text_input(
-                                "Search existing researchers",
-                                value=dec.get("search_query", author),
-                                key=_safe_key("search", norm),
-                                help="Type a name to find existing persons — then select below",
-                            )
-                            dec["search_query"] = search_query
-
-                            live_hits = search_person_index(
-                                search_query, list(st.session_state.person_index)
-                            )
-
-                            # Build selectbox options:
-                            # option 0 = "➕ Create as NEW PERSON"
-                            # options 1..N = matched existing persons
-                            NEW_PERSON_LABEL = f"➕ Create as NEW PERSON  (ID will be {first.get('suggested_pid', 'auto')})"
-                            hit_options = [NEW_PERSON_LABEL]
-                            hit_map: dict[str, dict] = {}  # label → person dict
-                            for hit_score, hit_person in live_hits:
-                                lbl = (
-                                    f"[{hit_person['PersonID']}] {hit_person['AuthorFullName']}"
-                                    f"  ·  {int(hit_score*100)}% match"
-                                )
-                                hit_options.append(lbl)
-                                hit_map[lbl] = hit_person
-
-                            # Determine current selection index
-                            current_pid  = dec.get("resolved_pid", "")
-                            current_name = dec.get("resolved_name", author)
-                            default_sel  = 0  # new person
-                            if current_pid and current_pid != first.get("suggested_pid", ""):
-                                # A real existing person was previously selected — find in options
-                                for i, lbl in enumerate(hit_options):
-                                    if f"[{current_pid}]" in lbl:
-                                        default_sel = i
-                                        break
-                                if default_sel == 0 and current_pid:
-                                    # Previously-selected person not in current search results;
-                                    # show them as a pinned option so the selection persists
-                                    pinned_lbl = f"[{current_pid}] {current_name}  ·  selected"
-                                    hit_options.insert(1, pinned_lbl)
-                                    hit_map[pinned_lbl] = {
-                                        "PersonID": current_pid,
-                                        "AuthorFullName": current_name,
-                                        "OrganizationID": dec.get("org_ids", [""])[0],
-                                        "OrganizationIDs": dec.get("org_ids", [""]),
-                                    }
-                                    default_sel = 1
-
-                            chosen_lbl = st.selectbox(
-                                f"Identity for {author}",
-                                options=hit_options,
-                                index=default_sel,
-                                key=_safe_key("identity_new", norm),
-                            )
-
-                            if chosen_lbl == NEW_PERSON_LABEL:
-                                dec["resolved_pid"]  = first.get("suggested_pid", "")
-                                dec["resolved_name"] = author
-                                dec["match_type"]    = "new"
-                                dec["org_ids"]       = dec.get("org_ids") or [""]
-                                st.caption(f"Will be registered as a new person · ID {dec['resolved_pid']}")
-                            else:
-                                chosen_person = hit_map[chosen_lbl]
-                                new_org_ids = chosen_person.get("OrganizationIDs") or (
-                                    [chosen_person["OrganizationID"]]
-                                    if chosen_person.get("OrganizationID") else []
-                                )
-                                dec["resolved_pid"]  = chosen_person["PersonID"]
-                                dec["resolved_name"] = chosen_person["AuthorFullName"]
-                                dec["match_type"]    = "resolved"
-                                dec["org_ids"]       = new_org_ids or [""]
-                                # Push the org labels into the multiselect widget state
-                                # so the org picker auto-fills without requiring a re-render
-                                orgs_key = _safe_key("orgs", norm)
-                                new_org_labels = [label_for_org(o) for o in new_org_ids if o]
-                                valid_org_labels = [l for l in new_org_labels if l in org_map]
-                                if valid_org_labels:
-                                    st.session_state[orgs_key] = valid_org_labels
-                                # Also pre-approve when resolving to existing person
-                                approve_key = _safe_key("approve", norm)
-                                if approve_key not in st.session_state:
-                                    st.session_state[approve_key] = True
-                                dec["approved"]     = True
-                                dec["user_decided"] = True
-                                # Check immediately if this is a duplicate
-                                ep = st.session_state.get("existing_pairs", set())
-                                for it in items:
-                                    if (chosen_person["PersonID"], it["UT"]) in ep:
-                                        st.warning(
-                                            f"⚠️ **Probable duplicate** — "
-                                            f"{chosen_person['AuthorFullName']} (ID {chosen_person['PersonID']}) "
-                                            f"is already linked to **{it['UT']}** in MyOrg. "
-                                            f"If you approve this, it will be **skipped** (not re-uploaded).",
-                                        )
-                                        break
-
-                    with id_col2:
-                        if cfg.get("allow_multi_org", True):
-                            selected_labels = st.multiselect(
-                                "Assign organization(s)",
-                                options=list(org_map.keys()),
-                                default=[
-                                    label_for_org(oid)
-                                    for oid in dec.get("org_ids", [""])
-                                    if oid and label_for_org(oid) != org_labels[0]
-                                ],
-                                key=_safe_key("orgs", norm),
-                            )
-                            dec["org_ids"] = [org_map[lbl] for lbl in selected_labels] or [""]
-                        else:
-                            sel = st.selectbox(
-                                "Assign organization",
-                                options=org_labels,
-                                key=_safe_key("org", norm),
-                            )
-                            dec["org_ids"] = [org_map[sel]] if sel in org_map else [""]
-
-                    st.markdown("---")
-                    ap_col, rj_col = st.columns(2)
-                    with ap_col:
-                        # Determine correct initial value:
-                        # - if widget key already in session_state, sync from there
-                        #   (avoids Streamlit value=/session_state inversion bug)
-                        # - otherwise use dec["approved"] or default for match type
-                        approve_key = _safe_key("approve", norm)
-                        if approve_key in st.session_state:
-                            # Key exists: value= is ignored by Streamlit, but we
-                            # read it back to keep dec in sync
-                            approved_val = st.checkbox(
-                                "✅ **Approve & include in upload**",
-                                key=approve_key,
-                                help="Check to include this entry in the upload-ready CSV"
-                            )
-                        else:
-                            # First render for this item: use saved/default value
-                            init_val = dec.get("approved", dec.get("match_type", mt) != "new")
-                            approved_val = st.checkbox(
-                                "✅ **Approve & include in upload**",
-                                value=init_val,
-                                key=approve_key,
-                                help="Check to include this entry in the upload-ready CSV"
-                            )
-                        dec["approved"]      = approved_val
-                        dec["user_decided"]  = True  # rendered = user had a chance to decide
-                    with rj_col:
-                        if not dec.get("approved", True):
-                            st.markdown(
-                                '<div style="background:#fdecea;border-left:4px solid #e74c3c;'
-                                'padding:0.5rem 0.8rem;border-radius:0 6px 6px 0;margin-top:0.3rem;">'
-                                '⛔ This entry will be <b>excluded</b> from the output.</div>',
-                                unsafe_allow_html=True
-                            )
-                        else:
-                            st.markdown(
-                                '<div style="background:#eafaf1;border-left:4px solid #27ae60;'
-                                'padding:0.5rem 0.8rem;border-radius:0 6px 6px 0;margin-top:0.3rem;">'
-                                '✅ This entry will be <b>included</b> in the upload.</div>',
-                                unsafe_allow_html=True
-                            )
-                    decisions[norm] = dec
-
-        st.session_state.decisions = decisions
-
-        st.markdown("---")
-
-        if st.button("💾  Save Decisions & Prepare Output", type="primary",
-                     use_container_width=True):
-            output_rows   = []
-            rejected_rows = []
-            seen: set[tuple] = set()
-
-            # Auto-confirmed exact matches
-            for row in confirmed_auto:
-                key = (row["PersonID"], row["UT"], row["OrganizationID"])
-                if key not in seen:
-                    seen.add(key)
-                    output_rows.append(row)
-
-            # User decisions
-            needs_by_norm: dict[str, list] = defaultdict(list)
-            for item in needs_review:
-                needs_by_norm[item["norm"]].append(item)
-
-            existing_pairs_save = st.session_state.get("existing_pairs", set())
-
-            for norm, items in needs_by_norm.items():
-                dec = decisions.get(norm)
-                item_mt = items[0].get("match_type", "new")
-                # Use the decision's match_type if user resolved to existing person
-                dec_mt = dec.get("match_type", item_mt) if dec else item_mt
-                # New persons require explicit approval; fuzzy/initial/resolved default approved
-                default_approved = dec_mt != "new"
-                if not dec or not dec.get("approved", default_approved):
-                    for it in items:
-                        rejected_rows.append({
-                            "AuthorFullName": it["AuthorFullName"],
-                            "UT": it["UT"],
-                            "Reason": "User rejected" if dec else "No decision made",
-                        })
-                    continue
-
-                pid           = str(dec.get("resolved_pid", "")).strip()
-                # Fall back to staged PID only if resolved_pid is genuinely empty
-                # (i.e. user never selected anything — shouldn't happen with new UI)
-                if not pid:
-                    pid = str(items[0].get("suggested_pid", "")).strip()
-                resolved_name = dec.get("resolved_name", items[0]["AuthorFullName"])
-                org_ids       = [o for o in dec.get("org_ids", [""]) if o] or [""]
-
-                for item in items:
-                    # Check if this (PersonID, UT) is already in MyOrg
-                    # Catches cases where user resolved a 'new' person to an existing PID
-                    if pid and (pid, item["UT"]) in existing_pairs_save:
-                        rejected_rows.append({
-                            "AuthorFullName": resolved_name,
-                            "UT": item["UT"],
-                            "Reason": "Already in MyOrg (resolved match)",
-                        })
-                        continue
-
-                    for oid in org_ids:
-                        key = (pid, item["UT"], oid)
-                        if key in seen:
-                            rejected_rows.append({
-                                "AuthorFullName": resolved_name,
-                                "UT": item["UT"],
-                                "Reason": "Duplicate",
-                            })
-                            continue
-                        seen.add(key)
-                        output_rows.append({
-                            "PersonID":       pid,
-                            "AuthorFullName": resolved_name,
-                            "UT":             item["UT"],
-                            "OrganizationID": oid,
-                            "match_type":     dec.get("match_type", ""),
-                        })
-
-            st.session_state.output_rows   = output_rows
-            st.session_state.rejected_rows = rejected_rows
-            st.session_state.finalized     = True
-            st.success(
-                f"✅ {len(output_rows)} rows finalized "
-                f"({len(rejected_rows)} rejected). Go to **Tab 3** to export."
+            # Affil chips
+            chips = " ".join(
+                f'<span class="chip">{a}</span>'
+                for a in r.get("muv_affils", [r.get("RawAffil", "")])[:3]
             )
 
+            # Card styling
+            card_cls = "author-row"
+            if decided:
+                if dec.get("action") == "reject":
+                    card_cls += " rejected"
+                else:
+                    card_cls += " locked"
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — EXPORT OUTPUT
-# ══════════════════════════════════════════════════════════════════════════════
-
-with tab_output:
-    if not st.session_state.processed:
-        st.info("⬅️ Please complete Tabs 1 and 2 first.")
-    elif not st.session_state.finalized:
-        st.warning("⚠️ Please save decisions in **Tab 2** before exporting.")
-    else:
-        output_rows   = st.session_state.output_rows
-        rejected_rows = st.session_state.rejected_rows
-        source_file   = st.session_state.source_file
-        orgs          = st.session_state.orgs
-        batch_result  = st.session_state.batch_result
-
-        st.markdown('<div class="sec-head">📤 Export Files</div>', unsafe_allow_html=True)
-
-        st.markdown(f"""
-<div class="metric-grid">
-  <div class="metric-card"><div class="num num-green">{len(output_rows)}</div><div class="lbl">Upload-Ready Rows</div></div>
-  <div class="metric-card"><div class="num num-orange">{len(rejected_rows)}</div><div class="lbl">Rejected / Skipped</div></div>
+            st.markdown(f"""
+<div class="{card_cls}">
+  <span class="badge {bcls}">{blbl}</span>
+  <b>{raw_author}</b>
+  <span style="font-size:.75rem;color:#7a8fa0;margin-left:.5rem;">{chips}</span>
 </div>
 """, unsafe_allow_html=True)
 
-        # ── Upload-ready CSV ─────────────────────────────────────────────────
-        st.markdown("#### 1. Upload-Ready CSV")
-        st.markdown("Compatible with WoS My Organization bulk import format.")
+            with st.container():
+                left, right = st.columns([3, 2])
 
-        csv_bytes = build_upload_csv(output_rows, source_file).encode("utf-8")
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                with left:
+                    # ── Identity picker ────────────────────────────────────────
+                    cands = r.get("candidates", [])
 
-        st.download_button(
-            label="⬇️  Download Upload-Ready CSV",
-            data=csv_bytes,
-            file_name=f"upload_ready_{ts}.csv",
-            mime="text/csv",
+                    if mt in ("fuzzy", "initial_expansion") and cands:
+                        # Algorithm candidates + search override
+                        cand_labels = [
+                            f"[{p['PersonID']}] {p['AuthorFullName']}  ({s:.2f})"
+                            for s, p, _ in cands
+                        ]
+                        cand_labels.append("➕ Create as NEW PERSON")
+
+                        saved_choice = dec.get("_cand_choice", cand_labels[0])
+                        def_idx = cand_labels.index(saved_choice) if saved_choice in cand_labels else 0
+
+                        choice = st.selectbox(
+                            f"Identity for **{raw_author}**",
+                            cand_labels,
+                            index=def_idx,
+                            key=_safe_key("cand", norm, ut),
+                            disabled=decided,
+                        )
+                        dec["_cand_choice"] = choice
+
+                        if not dec.get("_override_pid"):
+                            if "NEW PERSON" in choice:
+                                dec["resolved_pid"]  = r.get("suggested_pid", "")
+                                dec["resolved_name"] = raw_author
+                                dec["match_type"]    = "new"
+                                dec["org_ids"]       = [""]
+                            else:
+                                idx_c = cand_labels.index(choice)
+                                _, cp, _ = cands[idx_c]
+                                dec["resolved_pid"]  = cp["PersonID"]
+                                dec["resolved_name"] = cp["AuthorFullName"]
+                                dec["match_type"]    = "resolved"
+                                dec["org_ids"] = cp.get("OrganizationIDs") or (
+                                    [cp["OrganizationID"]] if cp.get("OrganizationID") else [""])
+
+                    else:
+                        # New person — search picker
+                        sq = st.text_input(
+                            f"Search existing for **{raw_author}**",
+                            value=dec.get("_search", raw_author),
+                            key=_safe_key("search", norm, ut),
+                            disabled=decided,
+                        )
+                        dec["_search"] = sq
+
+                        hits = search_persons(sq, person_index)
+                        NEW_LBL = f"➕ Create as NEW PERSON  (ID {r.get('suggested_pid','')})"
+                        opts = [NEW_LBL] + [
+                            f"[{hp['PersonID']}] {hp['AuthorFullName']}  ·  {int(hs*100)}%"
+                            for hs, hp in hits
+                        ]
+                        hit_map = {
+                            f"[{hp['PersonID']}] {hp['AuthorFullName']}  ·  {int(hs*100)}%": hp
+                            for hs, hp in hits
+                        }
+                        saved_s = dec.get("_search_choice", NEW_LBL)
+                        s_def   = opts.index(saved_s) if saved_s in opts else 0
+
+                        sch = st.selectbox(
+                            f"Identity for **{raw_author}**",
+                            opts,
+                            index=s_def,
+                            key=_safe_key("search_pick", norm, ut),
+                            disabled=decided,
+                        )
+                        dec["_search_choice"] = sch
+
+                        if not dec.get("_override_pid"):
+                            if sch == NEW_LBL:
+                                dec["resolved_pid"]  = r.get("suggested_pid", "")
+                                dec["resolved_name"] = raw_author
+                                dec["match_type"]    = "new"
+                                dec["org_ids"]       = [""]
+                            else:
+                                hp = hit_map[sch]
+                                dec["resolved_pid"]  = hp["PersonID"]
+                                dec["resolved_name"] = hp["AuthorFullName"]
+                                dec["match_type"]    = "resolved"
+                                dec["org_ids"] = hp.get("OrganizationIDs") or (
+                                    [hp["OrganizationID"]] if hp.get("OrganizationID") else [""])
+
+                    # ── Override search (for fuzzy/initial) ───────────────────
+                    if mt in ("fuzzy", "initial_expansion"):
+                        ovr_active = bool(dec.get("_override_pid"))
+                        ovr_lbl = (
+                            f"✏️ Override: {dec.get('resolved_name','')} [{dec.get('resolved_pid','')}]"
+                            if ovr_active else "🔍 Not right? Search full list"
+                        )
+                        with st.expander(ovr_lbl, expanded=ovr_active):
+                            if ovr_active and not decided:
+                                if st.button("✖ Clear override",
+                                             key=_safe_key("clr_ovr", norm, ut)):
+                                    for k in ("_override_pid","_override_query","_override_choice"):
+                                        dec.pop(k, None)
+                                    _set_dec(norm, ut, dec)
+                                    st.rerun()
+
+                            ovq = st.text_input(
+                                "Search",
+                                value=dec.get("_override_query", ""),
+                                key=_safe_key("ovr_q", norm, ut),
+                                disabled=decided,
+                            )
+                            dec["_override_query"] = ovq
+
+                            if ovq:
+                                oh = search_persons(ovq, person_index)
+                                if oh:
+                                    NEW_OVR = f"➕ Create as NEW PERSON  (ID {r.get('suggested_pid','')})"
+                                    o_opts  = [NEW_OVR] + [
+                                        f"[{hp['PersonID']}] {hp['AuthorFullName']}  ·  {int(hs*100)}%"
+                                        for hs, hp in oh
+                                    ]
+                                    o_map   = {
+                                        f"[{hp['PersonID']}] {hp['AuthorFullName']}  ·  {int(hs*100)}%": hp
+                                        for hs, hp in oh
+                                    }
+                                    saved_o = dec.get("_override_choice", NEW_OVR)
+                                    o_def   = o_opts.index(saved_o) if saved_o in o_opts else 0
+                                    oc = st.selectbox(
+                                        "Select",
+                                        o_opts,
+                                        index=o_def,
+                                        key=_safe_key("ovr_pick", norm, ut),
+                                        disabled=decided,
+                                    )
+                                    dec["_override_choice"] = oc
+                                    if oc != NEW_OVR:
+                                        op = o_map[oc]
+                                        dec["resolved_pid"]    = op["PersonID"]
+                                        dec["resolved_name"]   = op["AuthorFullName"]
+                                        dec["match_type"]      = "resolved"
+                                        dec["_override_pid"]   = op["PersonID"]
+                                        new_org = op.get("OrganizationIDs") or (
+                                            [op["OrganizationID"]] if op.get("OrganizationID") else [])
+                                        dec["org_ids"] = new_org or [""]
+                                        # push to multiselect key
+                                        ok = _safe_key("orgs", norm, ut)
+                                        valid = [org_label(o, org_map) for o in new_org if o]
+                                        valid = [l for l in valid if l in org_map]
+                                        if valid:
+                                            st.session_state[ok] = valid
+                                    else:
+                                        dec["resolved_pid"]  = r.get("suggested_pid", "")
+                                        dec["resolved_name"] = raw_author
+                                        dec["match_type"]    = "new"
+                                        dec["org_ids"]       = [""]
+                                        dec.pop("_override_pid", None)
+                                else:
+                                    st.caption("No matches found.")
+
+                    # ── Show who will be used ──────────────────────────────────
+                    if dec.get("resolved_pid") and dec.get("resolved_name"):
+                        if dec["match_type"] == "new":
+                            st.caption(f"📋 Will be created as **{dec['resolved_name']}** (new ID {dec['resolved_pid']})")
+                        else:
+                            st.caption(f"✔ Resolves to **{dec['resolved_name']}** (ID {dec['resolved_pid']})")
+                            # Immediate duplicate warning
+                            ep = st.session_state.existing_pairs
+                            for it in [r]:
+                                if (dec["resolved_pid"], it.get("UT","")) in ep:
+                                    st.warning(f"⚠️ Already in MyOrg — will be skipped on save.")
+
+                with right:
+                    # ── Org picker ────────────────────────────────────────────
+                    ok = _safe_key("orgs", norm, ut)
+                    # Build default list
+                    default_labels = [
+                        org_label(o, org_map)
+                        for o in dec.get("org_ids", [""])
+                        if o and org_label(o, org_map) in org_map
+                    ]
+                    sel_orgs = st.multiselect(
+                        "Organisation(s)",
+                        options=list(org_map.keys()),
+                        default=default_labels if ok not in st.session_state else None,
+                        key=ok,
+                        disabled=decided,
+                    )
+                    dec["org_ids"] = [org_map[l] for l in sel_orgs] or [""]
+
+                    # ── Approve / Reject ──────────────────────────────────────
+                    st.markdown("")
+                    a_col, r_col = st.columns(2)
+                    with a_col:
+                        ap_key = _safe_key("approve", norm, ut)
+                        if st.button(
+                            "✅ Approve" if not decided or dec.get("action") == "reject" else "✅ Approved",
+                            key=ap_key,
+                            use_container_width=True,
+                            type="primary" if not decided else "secondary",
+                            disabled=(decided and dec.get("action") == "approve"),
+                        ):
+                            dec["decided"] = True
+                            dec["action"]  = "approve"
+                            _set_dec(norm, ut, dec)
+                            st.rerun()
+
+                    with r_col:
+                        rj_key = _safe_key("reject", norm, ut)
+                        if st.button(
+                            "❌ Reject" if not decided or dec.get("action") == "approve" else "❌ Rejected",
+                            key=rj_key,
+                            use_container_width=True,
+                            disabled=(decided and dec.get("action") == "reject"),
+                        ):
+                            dec["decided"] = True
+                            dec["action"]  = "reject"
+                            _set_dec(norm, ut, dec)
+                            st.rerun()
+
+                    if decided:
+                        if st.button("✏️ Undo", key=_safe_key("undo", norm, ut),
+                                     use_container_width=True):
+                            dec["decided"] = False
+                            _set_dec(norm, ut, dec)
+                            st.rerun()
+
+            _set_dec(norm, ut, dec)
+            st.markdown("<hr style='margin:.5rem 0;border-color:#e0e8ef;'>", unsafe_allow_html=True)
+
+        # ── Lock button ───────────────────────────────────────────────────────
+        st.markdown("")
+        can_lock = _all_authors_decided(ut) or not rev_rows
+
+        lock_help = "" if can_lock else "Decide all authors above before locking."
+        if st.button(
+            "🔒 Confirm & Lock Publication",
+            type="primary",
             use_container_width=True,
-        )
-
-        with st.expander("Preview upload CSV", expanded=False):
-            st.dataframe(pd.DataFrame(output_rows).head(30), use_container_width=True)
-
-        st.markdown("---")
-
-        # ── Review Excel ─────────────────────────────────────────────────────
-        needs_review = batch_result.get("needs_review", [])
-        if needs_review:
-            st.markdown("#### 2. Review Excel (for batch workflows)")
-            st.markdown("Share with library staff to fill in decisions offline.")
-            if HAS_OPENPYXL:
-                excel_bytes = build_review_excel(needs_review, orgs)
-                st.download_button(
-                    label="⬇️  Download Review Excel",
-                    data=excel_bytes,
-                    file_name=f"review_{ts}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+            disabled=not can_lock,
+            help=lock_help,
+            key=f"lock_{ut}",
+        ):
+            st.session_state.ut_locked[ut] = True
+            # Advance to next unlocked UT if possible
+            for i in range(idx + 1, len(ut_order)):
+                next_ut = ut_order[i]
+                if not st.session_state.ut_locked.get(next_ut) and _ut_status(next_ut) != "skip":
+                    st.session_state.ut_index = i
+                    break
             else:
-                st.warning("openpyxl not installed — Excel export unavailable.")
-            st.markdown("---")
+                st.session_state.ut_index = min(idx + 1, len(ut_order) - 1)
+            st.rerun()
 
-        # ── Audit log ────────────────────────────────────────────────────────
-        st.markdown("#### 3. Audit Log (JSON)")
-        new_persons_list = batch_result.get("new_persons", [])
-        if isinstance(new_persons_list, dict):
-            new_persons_list = list(new_persons_list.values())
+    # ── Sidebar mini-map ──────────────────────────────────────────────────────
+    with st.sidebar:
+        st.markdown("### Publication list")
+        for i, u in enumerate(ut_order):
+            icon = "✅" if _ut_is_done(u) else ("⏳" if _ut_needs_attention(u) else "—")
+            if st.button(f"{icon} {u}", key=f"sb_{i}", use_container_width=True):
+                st.session_state.ut_index = i
+                st.rerun()
 
-        n_exact   = len([r for r in batch_result.get("confirmed", [])
-                         if r.get("match_type") == "exact"])
-        n_initial = len([r for r in batch_result.get("needs_review", [])
-                         if r.get("match_type") == "initial_expansion"])
-        n_fuzzy   = len([r for r in batch_result.get("needs_review", [])
-                         if r.get("match_type") == "fuzzy"])
-        n_new     = len([r for r in batch_result.get("needs_review", [])
-                         if r.get("match_type") == "new"])
 
-        audit_json = build_audit_json(
-            summary={
-                "exact_matches":             n_exact,
-                "initial_expansion_matches": n_initial,
-                "fuzzy_matches":             n_fuzzy,
-                "new_persons":               n_new,
-                "finalized_records":         len(output_rows),
-                "rejected_records":          len(rejected_rows),
-            },
-            new_persons=new_persons_list,
-        )
-        st.download_button(
-            label="⬇️  Download Audit Log (JSON)",
-            data=audit_json.encode("utf-8"),
-            file_name=f"audit_{ts}.json",
-            mime="application/json",
-            use_container_width=True,
-        )
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — EXPORT
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_export:
+    if not st.session_state.processed:
+        st.info("⬅️ Complete Tabs 1 and 2 first.")
+        st.stop()
 
-        with st.expander("Preview audit log", expanded=False):
-            st.json(json.loads(audit_json))
+    result       = st.session_state.batch_result
+    ut_order     = st.session_state.ut_order
+    existing_pairs = st.session_state.existing_pairs
 
-        st.markdown("---")
+    n_locked = sum(1 for ut in ut_order
+                   if st.session_state.ut_locked.get(ut) or _ut_status(ut) == "skip")
+    n_total  = len(ut_order)
+    n_pending = n_total - n_locked
 
-        # ── Re-import filled Excel ────────────────────────────────────────────
-        st.markdown("#### 4. Re-import Filled Review Excel")
-        reimport_file = st.file_uploader("Upload filled review Excel",
-                                         type=["xlsx"], key="reimport")
-        if reimport_file and st.button("🔄 Merge Review Decisions"):
-            wb      = __import__("openpyxl").load_workbook(reimport_file)
-            ws      = wb["Author Review"]
-            headers = [c.value for c in ws[1]]
+    if n_pending > 0:
+        st.warning(f"⚠️ **{n_pending} publication(s) not yet locked.** "
+                   f"You can still export — unlocked publications will be included as-is, "
+                   f"with unapproved authors omitted.")
 
-            def col(n):
-                return headers.index(n)
+    if st.button("⚙️ Build export", type="primary", use_container_width=True):
+        output_rows   = []
+        rejected_rows = []
+        seen: set[tuple] = set()
 
-            extra_rows = []
-            skip_count = 0
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                approved = row[col("APPROVED")]
-                if approved and str(approved).strip().upper() == "YES":
-                    extra_rows.append({
-                        "PersonID":       str(row[col("Detected PersonID")] or ""),
-                        "AuthorFullName": str(row[col("Existing Name")]      or ""),
-                        "UT":             str(row[col("UT")]                  or ""),
-                        "OrganizationID": str(row[col("OrganizationID")]      or ""),
-                        # UT is also stored as DocumentID alias for build_upload_csv
-                        "DocumentID":     str(row[col("UT")]                  or ""),
-                    })
-                else:
-                    skip_count += 1
+        # 1 — Auto-confirmed exact rows
+        for r in result["confirmed"]:
+            k = (r["PersonID"], r.get("UT",""), r.get("OrganizationID",""))
+            if k not in seen:
+                seen.add(k)
+                output_rows.append(r)
 
-            merged     = output_rows + extra_rows
-            merged_csv = build_upload_csv(merged, source_file).encode("utf-8")
-            st.success(
-                f"✅ Merged {len(merged)} rows "
-                f"({len(extra_rows)} from review, {skip_count} skipped)"
-            )
+        # 2 — User decisions
+        for r in result["needs_review"]:
+            raw_author = r.get("AuthorFullName", r.get("author_full",""))
+            norm = normalize_name(raw_author)
+            ut   = r.get("UT","")
+            dec  = st.session_state.author_decs.get((norm, ut))
+
+            if not dec or dec.get("action") == "reject" or not dec.get("decided"):
+                rejected_rows.append({
+                    "AuthorFullName": raw_author, "UT": ut,
+                    "Reason": "Rejected" if (dec and dec.get("action") == "reject") else "Not decided",
+                })
+                continue
+
+            pid           = str(dec.get("resolved_pid","")).strip()
+            resolved_name = dec.get("resolved_name", raw_author)
+            org_ids       = [o for o in dec.get("org_ids",[""])  if o] or [""]
+
+            # Check against existing_pairs (resolved-to-existing may already be there)
+            if pid and (pid, ut) in existing_pairs:
+                rejected_rows.append({
+                    "AuthorFullName": resolved_name, "UT": ut,
+                    "Reason": "Already in MyOrg (resolved match)",
+                })
+                continue
+
+            for oid in org_ids:
+                k = (pid, ut, oid)
+                if k in seen:
+                    rejected_rows.append({"AuthorFullName": resolved_name, "UT": ut, "Reason": "Duplicate"})
+                    continue
+                seen.add(k)
+                output_rows.append({
+                    "PersonID": pid, "AuthorFullName": resolved_name,
+                    "UT": ut, "OrganizationID": oid,
+                    "match_type": dec.get("match_type",""),
+                })
+
+        st.session_state.output_rows   = output_rows
+        st.session_state.rejected_rows = rejected_rows
+        st.session_state.finalized     = True
+        st.success(f"✅ {len(output_rows)} rows ready · {len(rejected_rows)} excluded.")
+
+    if st.session_state.finalized:
+        output_rows   = st.session_state.output_rows
+        rejected_rows = st.session_state.rejected_rows
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        src = st.session_state.source_file
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            st.markdown("#### Upload-ready CSV")
+            csv_bytes = build_upload_csv(output_rows, src).encode("utf-8")
             st.download_button(
-                "⬇️ Download Merged CSV",
-                data=merged_csv,
-                file_name=f"upload_ready_merged_{ts}.csv",
+                "⬇️ Download upload_ready.csv",
+                data=csv_bytes,
+                file_name=f"upload_ready_{ts}.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — STATISTICS
-# ══════════════════════════════════════════════════════════════════════════════
-
-with tab_stats:
-    if not st.session_state.processed:
-        st.info("⬅️ Load and process data in Tab 1 to see statistics.")
-    else:
-        muv_pairs    = st.session_state.muv_pairs
-        batch_result = st.session_state.batch_result
-        person_index = st.session_state.person_index
-        orgs         = st.session_state.orgs
-
-        confirmed    = batch_result["confirmed"]
-        needs_review = batch_result["needs_review"]
-        new_persons  = batch_result["new_persons"]
-        if isinstance(new_persons, dict):
-            new_persons = list(new_persons.values())
-
-        st.markdown('<div class="sec-head">Processing Summary</div>', unsafe_allow_html=True)
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("WoS Records",           len(st.session_state.wos_records))
-        c2.metric("MUV Author-Doc Pairs",  len(muv_pairs))
-        c3.metric("Existing Persons",      len(person_index))
-        c4.metric("Organizations",         len(orgs))
-
-        already_up = batch_result.get("already_uploaded", [])
-
-        c5, c6, c7, c8 = st.columns(4)
-        c5.metric("Auto-Confirmed (exact)",    len(confirmed))
-        c6.metric("Initial-Expansion Matches", len([r for r in needs_review if r["match_type"] == "initial_expansion"]))
-        c7.metric("Fuzzy Matches",             len([r for r in needs_review if r["match_type"] == "fuzzy"]))
-        c8.metric("New Persons Staged",        len(new_persons))
-
-        already_up_exact = [r for r in already_up if r.get("match_type") != "probable_duplicate"]
-        already_up_prob  = [r for r in already_up if r.get("match_type") == "probable_duplicate"]
-
-        c9, c10, c11, _ = st.columns(4)
-        c9.metric("Needs Review",        len(needs_review))
-        c10.metric("Already in MyOrg",   len(already_up_exact),
-                   help="Exact (PersonID, UT) pairs already in ResearcherAndDocument.csv")
-        c11.metric("Probable Duplicates", len(already_up_prob),
-                   help="High-confidence name matches (≥0.90) whose UT already exists for that person")
-
-        if already_up_prob:
-            st.markdown("---")
-            st.markdown('<div class="sec-head">⚠ Probable Duplicates — auto-skipped</div>', unsafe_allow_html=True)
-            st.caption(
-                "These are high-confidence name matches (initial-expansion or fuzzy, score ≥ 0.90) "
-                "where the matched PersonID already has this UT in ResearcherAndDocument.csv. "
-                "They were skipped automatically to avoid re-uploading existing records."
+            st.dataframe(
+                pd.DataFrame(output_rows)[["PersonID","AuthorFullName","UT","OrganizationID"]]
+                if output_rows else pd.DataFrame(),
+                use_container_width=True, height=300,
             )
-            df_prob = pd.DataFrame([{
-                "WoS Name":    r.get("author_full", r.get("AuthorFullName", "")),
-                "Matched To":  r.get("AuthorFullName", ""),
-                "PersonID":    r.get("PersonID", ""),
-                "Score":       f'{r.get("match_score", 0):.2f}',
-                "UT":          r.get("UT", r.get("ut", "")),
-                "OrgID":       r.get("OrganizationID", ""),
-                "Reason":      r.get("Reason", ""),
-            } for r in already_up_prob])
-            st.dataframe(df_prob, use_container_width=True)
 
-        if already_up_exact:
-            st.markdown("---")
-            st.markdown('<div class="sec-head">⏭ Already in MyOrg — exact skip</div>', unsafe_allow_html=True)
-            df_up = pd.DataFrame([{
-                "PersonID":   r.get("PersonID", ""),
-                "Author":     r.get("AuthorFullName", ""),
-                "UT":         r.get("UT", r.get("ut", "")),
-                "OrgID":      r.get("OrganizationID", ""),
-                "Reason":     r.get("Reason", "Already in MyOrg"),
-            } for r in already_up_exact])
-            st.dataframe(df_up, use_container_width=True)
+        with c2:
+            st.markdown("#### Excluded rows")
+            if rejected_rows:
+                st.download_button(
+                    "⬇️ Download excluded.csv",
+                    data=pd.DataFrame(rejected_rows).to_csv(index=False).encode("utf-8"),
+                    file_name=f"excluded_{ts}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.dataframe(pd.DataFrame(rejected_rows), use_container_width=True, height=300)
+            else:
+                st.success("No excluded rows.")
 
-        st.markdown("---")
-
-        st.markdown('<div class="sec-head">MUV Authors in Input</div>', unsafe_allow_html=True)
-        author_doc_counts: dict[str, int] = defaultdict(int)
-        for p in muv_pairs:
-            author_doc_counts[p["author_full"]] += 1
-
-        if author_doc_counts:
-            df_authors = pd.DataFrame([
-                {"Author": k, "Documents": v}
-                for k, v in sorted(author_doc_counts.items(), key=lambda x: -x[1])
-            ])
-            st.bar_chart(df_authors.set_index("Author")["Documents"])
-
-        st.markdown("---")
-
-        st.markdown('<div class="sec-head">MUV Affiliation Strings Detected</div>',
-                    unsafe_allow_html=True)
-        affil_counts: dict[str, int] = defaultdict(int)
-        for p in muv_pairs:
-            for a in p["muv_affils"]:
-                affil_counts[a] += 1
-
-        if affil_counts:
-            df_affils = pd.DataFrame([
-                {"Affiliation": k, "Count": v}
-                for k, v in sorted(affil_counts.items(), key=lambda x: -x[1])
-            ])
-            st.dataframe(df_affils, use_container_width=True)
-
-        st.markdown("---")
-
-        st.markdown('<div class="sec-head">All MUV Author-Document Pairs</div>',
-                    unsafe_allow_html=True)
-        df_pairs = pd.DataFrame([{
-            "Author":           p["author_full"],
-            "UT":               p["ut"],
-            "MUV Affiliations": " | ".join(p["muv_affils"]),
-        } for p in muv_pairs])
-        st.dataframe(df_pairs, use_container_width=True, height=300)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — HELP
-# ══════════════════════════════════════════════════════════════════════════════
-
-with tab_help:
-    st.markdown("""
-## WoS MUV Affiliation Ingestion Tool · User Guide
-
-### Overview
-This tool identifies **Medical University of Varna (MUV)**-affiliated authors from
-Web of Science (WoS) exports and generates upload-ready entries for the
-**WoS My Organization** module.
-
----
-
-### Workflow
-
-| Step | Tab | What to do |
-|------|-----|-----------|
-| 1 | Load Files | Upload WoS export CSV, ResearcherAndDocument.csv, and OrganizationHierarchy.csv |
-| 2 | Review & Resolve | Verify matches, assign organizations, approve/reject entries |
-| 3 | Export Output | Download upload-ready CSV, review Excel, and audit log |
-
----
-
-### Input Files
-
-**WoS Export CSV** (`input*.csv`)
-- Must contain columns: `AF`, `C1`, `UT`
-- Export from WoS using "Tab-delimited (Win, UTF-8)" format → save as CSV
-
-**ResearcherAndDocument.csv**
-- Download from WoS My Organization → Export
-- Columns: `PersonID`, `FirstName`, `LastName`, `OrganizationID`, `DocumentID`
-
-**OrganizationHierarchy.csv**
-- Download from WoS My Organization → Settings → Org Hierarchy
-- Columns: `OrganizationID`, `OrganizationName`, `ParentOrgaID`
-
----
-
-### Match Types
-
-| Badge | Meaning | Action required |
-|-------|---------|-----------------|
-| ✓ EXACT | Exact name match found | None — auto-confirmed |
-| 🔤 INITIAL MATCH | WoS initials are compatible with a master full name (e.g. `Lazarov, N.` → `Lazarov, Nikola R.`) | Confirm or redirect to a different person |
-| ⚠ AMBIGUOUS | Name similar to existing person(s) | Choose correct person or create new |
-| 🆕 NEW PERSON | No match found | Verify and assign organization |
-
-### Sibling Groups
-When two WoS name variants refer to the same person (e.g. `Lazarov, N. R.` and
-`Lazarov, N.`), they are shown under a **🔗 Sibling group** banner so you can
-resolve them together.
-
----
-
-### Configuration (sidebar)
-
-- **Fuzzy threshold**: 0.85 recommended. Lower = more fuzzy matches surfaced.
-- **MUV patterns**: Customize to catch transliteration variants or new sub-units.
-- **Multi-org**: Allow assigning one author to multiple organizational units.
-
----
-
-### Batch Workflow (for library teams)
-
-1. Run processing → download **Review Excel** from Tab 3
-2. Share Excel with curators to fill in `OrganizationID` and set `APPROVED = YES`
-3. Return to the app → Tab 3 → upload filled Excel → download merged CSV
-4. Import merged CSV into WoS My Organization
-""")
+        # New persons CSV
+        new_pids = sorted({
+            r["PersonID"] for r in output_rows
+            if r.get("match_type") == "new"
+        })
+        if new_pids:
+            st.markdown("#### New persons to register")
+            st.caption("These PersonIDs are new — add them to ResearcherAndDocument.csv before the next run.")
+            new_person_names = {
+                dec["resolved_pid"]: dec["resolved_name"]
+                for (norm_k, ut_k), dec in st.session_state.author_decs.items()
+                if dec.get("match_type") == "new" and dec.get("action") == "approve"
+            }
+            new_rows = [{"PersonID": pid, "SuggestedName": new_person_names.get(pid, "")}
+                        for pid in new_pids]
+            st.dataframe(pd.DataFrame(new_rows), use_container_width=True)
+            st.download_button(
+                "⬇️ Download new_persons.csv",
+                data=pd.DataFrame(new_rows).to_csv(index=False).encode("utf-8"),
+                file_name=f"new_persons_{ts}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
