@@ -214,8 +214,10 @@ def _is_muv_affiliation(affil_norm: str, patterns: list[str]) -> bool:
     """
     FALLBACK_PATTERNS = [
         "med univ prof dr paraskev stoyanov varna",
+        "med univ prof dr paraskev stoyanov",   # without city (dept follows directly)
         "varna med univ",
         "paraskev stoyanov varna",
+        "paraskev stoyanov",                    # minimal form without city
     ]
     all_patterns = list(patterns) + FALLBACK_PATTERNS
     return any(p in affil_norm for p in all_patterns)
